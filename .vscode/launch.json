@@ -1,0 +1,30 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "node-terminal",
+      "name": "Frontend Dev (Vite)",
+      "request": "launch",
+      "command": "npm run dev",
+      "cwd": "${workspaceFolder}/gui"
+    },
+    {
+      "type": "node-terminal",
+      "name": "Tauri Dev",
+      "request": "launch",
+      "command": "cargo tauri dev",
+      "cwd": "${workspaceFolder}/gui",
+      "env": {
+        "HTTP_PROXY": "http://127.0.0.1:7890",
+        "HTTPS_PROXY": "http://127.0.0.1:7890"
+      }
+    },
+    {
+      "type": "node-terminal",
+      "name": "Tauri Build",
+      "request": "launch",
+      "command": "cargo tauri build",
+      "cwd": "${workspaceFolder}/gui"
+    }
+  ]
+}

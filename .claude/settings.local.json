@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p \"d:/project/statcode/gui/src-tauri/src\" \"d:/project/statcode/gui/src-tauri/capabilities\" \"d:/project/statcode/gui/src/components\" \"d:/project/statcode/gui/src/context\" \"d:/project/statcode/gui/src/types\")",
+      "Bash(npm install *)",
+      "Bash(npx tsc *)",
+      "Bash(npx vite *)",
+      "Bash(cargo check *)",
+      "Bash(node -e ' *)",
+      "Bash(npx tauri *)"
+    ],
+    "additionalDirectories": [
+      "d:\\project\\statcode\\gui\\src-tauri"
+    ]
+  }
+}
