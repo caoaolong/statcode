@@ -4,8 +4,45 @@
 
 :root {
   --sidebar-width: 240px;
+  --bg-app: #f8fafc;
+  --bg-surface: #ffffff;
+  --bg-muted: #f1f5f9;
+  --bg-subtle: #f8fafc;
+  --border-default: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --border-subtle: #f1f5f9;
+  --text-primary: #1e293b;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --text-faint: #94a3b8;
+  --text-disabled: #cbd5e1;
+  --scrollbar-thumb: #cbd5e1;
+  --scrollbar-thumb-hover: #94a3b8;
+  --tooltip-bg: #ffffff;
+  --tooltip-border: #e2e8f0;
+  --tooltip-text: #1e293b;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+
+html.dark {
+  --bg-app: #0f172a;
+  --bg-surface: #1e293b;
+  --bg-muted: #334155;
+  --bg-subtle: #1e293b;
+  --border-default: #334155;
+  --border-strong: #475569;
+  --border-subtle: #334155;
+  --text-primary: #f1f5f9;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
+  --text-faint: #64748b;
+  --text-disabled: #475569;
+  --scrollbar-thumb: #334155;
+  --scrollbar-thumb-hover: #475569;
+  --tooltip-bg: #1e293b;
+  --tooltip-border: #334155;
+  --tooltip-text: #f1f5f9;
 }
 
 * {
@@ -15,9 +52,10 @@
 }
 
 body {
-  background: #f8fafc;
-  color: #1e293b;
+  background: var(--bg-app);
+  color: var(--text-primary);
   overflow: hidden;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
 /* Custom scrollbar */
@@ -25,21 +63,48 @@ body {
   width: 6px;
   height: 6px;
 }
-
 ::-webkit-scrollbar-track {
   background: transparent;
 }
-
 ::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+  background: var(--scrollbar-thumb);
   border-radius: 3px;
 }
-
 ::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+  background: var(--scrollbar-thumb-hover);
 }
 
 /* Smooth transitions */
 .transition-smooth {
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Recharts tooltip surface */
+.recharts-tooltip-wrapper .recharts-default-tooltip {
+  background: var(--tooltip-bg) !important;
+  border: 1px solid var(--tooltip-border) !important;
+  color: var(--tooltip-text) !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
+  border-radius: 12px !important;
+}
+.recharts-tooltip-wrapper .recharts-tooltip-label,
+.recharts-tooltip-wrapper .recharts-tooltip-item {
+  color: var(--tooltip-text) !important;
+}
+.recharts-cartesian-axis-tick text,
+.recharts-legend-item-text {
+  fill: var(--text-muted) !important;
+  color: var(--text-muted) !important;
+}
+.recharts-cartesian-grid line {
+  stroke: var(--border-subtle) !important;
+}
+
+/* Hide scrollbar but keep scrollability */
+.scrollbar-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
 }

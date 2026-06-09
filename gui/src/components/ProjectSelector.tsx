@@ -56,8 +56,8 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
     <div className="max-w-4xl mx-auto">
       {/* Header */}
       <div className="mb-8">
-        <h2 className="text-2xl font-bold text-slate-800 mb-2">项目选择</h2>
-        <p className="text-slate-500">
+        <h2 className="text-2xl font-bold text-[var(--text-primary)] mb-2">项目选择</h2>
+        <p className="text-[var(--text-muted)]">
           选择一个项目文件夹开始分析代码结构和统计信息
         </p>
       </div>
@@ -69,8 +69,8 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
           relative overflow-hidden rounded-2xl border-2 border-dashed cursor-pointer
           transition-all duration-300 group
           ${projectPath
-            ? "border-indigo-200 bg-indigo-50/50 hover:border-indigo-300"
-            : "border-slate-200 bg-white hover:border-indigo-300 hover:bg-indigo-50/30"
+            ? "border-indigo-200 dark:border-indigo-500/40 bg-indigo-50/50 dark:bg-indigo-500/10 hover:border-indigo-300 dark:hover:border-indigo-400"
+            : "border-[var(--border-default)] bg-[var(--bg-surface)] hover:border-indigo-300 dark:hover:border-indigo-500 hover:bg-indigo-50/30 dark:hover:bg-indigo-500/5"
           }
         `}
       >
@@ -80,8 +80,8 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
               w-16 h-16 rounded-2xl flex items-center justify-center mb-5
               transition-all duration-300 group-hover:scale-110
               ${projectPath
-                ? "bg-indigo-100 text-indigo-600"
-                : "bg-slate-100 text-slate-400 group-hover:bg-indigo-100 group-hover:text-indigo-500"
+                ? "bg-indigo-100 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-300"
+                : "bg-[var(--bg-muted)] text-[var(--text-faint)] group-hover:bg-indigo-100 dark:group-hover:bg-indigo-500/20 group-hover:text-indigo-500 dark:group-hover:text-indigo-300"
               }
             `}
           >
@@ -90,26 +90,26 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
 
           {projectPath ? (
             <>
-              <p className="text-sm text-slate-500 mb-1">当前项目</p>
-              <p className="text-lg font-semibold text-slate-800 mb-1">
+              <p className="text-sm text-[var(--text-muted)] mb-1">当前项目</p>
+              <p className="text-lg font-semibold text-[var(--text-primary)] mb-1">
                 {projectName}
               </p>
-              <p className="text-xs text-slate-400 font-mono max-w-md truncate">
+              <p className="text-xs text-[var(--text-faint)] font-mono max-w-md truncate">
                 {projectPath}
               </p>
-              <p className="text-sm text-indigo-500 mt-4 group-hover:text-indigo-600">
+              <p className="text-sm text-indigo-500 dark:text-indigo-400 mt-4 group-hover:text-indigo-600 dark:group-hover:text-indigo-300">
                 点击重新选择项目
               </p>
             </>
           ) : (
             <>
-              <p className="text-lg font-semibold text-slate-700 mb-2">
+              <p className="text-lg font-semibold text-[var(--text-secondary)] mb-2">
                 选择项目文件夹
               </p>
-              <p className="text-sm text-slate-400 mb-4">
+              <p className="text-sm text-[var(--text-faint)] mb-4">
                 点击此处浏览并选择要分析的项目目录
               </p>
-              <div className="flex items-center gap-2 text-sm text-indigo-500 group-hover:text-indigo-600">
+              <div className="flex items-center gap-2 text-sm text-indigo-500 dark:text-indigo-400 group-hover:text-indigo-600 dark:group-hover:text-indigo-300">
                 <span>浏览文件夹</span>
                 <ArrowRight size={16} className="group-hover:translate-x-1 transition-transform" />
               </div>
@@ -119,7 +119,7 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
 
         {/* Loading overlay */}
         {isAnalyzing && (
-          <div className="absolute inset-0 bg-white/80 backdrop-blur-sm flex items-center justify-center">
+          <div className="absolute inset-0 bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm flex items-center justify-center">
             <div className="flex flex-col items-center gap-3">
               <div className="w-10 h-10 border-3 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
               <p className="text-sm font-medium text-indigo-600">
@@ -132,7 +132,7 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
 
       {/* Error */}
       {error && (
-        <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-xl text-sm text-red-600">
+        <div className="mt-4 p-4 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-xl text-sm text-red-600 dark:text-red-300">
           {error}
         </div>
       )}
@@ -187,18 +187,33 @@ function StatCard({
   value: string;
   color: string;
 }) {
-  const colorMap: Record<string, { bg: string; text: string; icon: string }> = {
-    indigo: { bg: "bg-indigo-50", text: "text-indigo-700", icon: "text-indigo-500" },
-    emerald: { bg: "bg-emerald-50", text: "text-emerald-700", icon: "text-emerald-500" },
-    amber: { bg: "bg-amber-50", text: "text-amber-700", icon: "text-amber-500" },
+  const colorMap: Record<string, { bg: string; text: string; icon: string; border: string }> = {
+    indigo: {
+      bg: "bg-indigo-50 dark:bg-indigo-500/10",
+      text: "text-indigo-700 dark:text-indigo-300",
+      icon: "text-indigo-500 dark:text-indigo-400",
+      border: "border-indigo-100 dark:border-indigo-500/20",
+    },
+    emerald: {
+      bg: "bg-emerald-50 dark:bg-emerald-500/10",
+      text: "text-emerald-700 dark:text-emerald-300",
+      icon: "text-emerald-500 dark:text-emerald-400",
+      border: "border-emerald-100 dark:border-emerald-500/20",
+    },
+    amber: {
+      bg: "bg-amber-50 dark:bg-amber-500/10",
+      text: "text-amber-700 dark:text-amber-300",
+      icon: "text-amber-500 dark:text-amber-400",
+      border: "border-amber-100 dark:border-amber-500/20",
+    },
   };
   const c = colorMap[color] || colorMap.indigo;
 
   return (
-    <div className={`${c.bg} rounded-xl p-5 border border-${color}-100`}>
+    <div className={`${c.bg} rounded-xl p-5 border ${c.border}`}>
       <Icon size={20} className={`${c.icon} mb-3`} />
-      <p className="text-2xl font-bold text-slate-800">{value}</p>
-      <p className="text-sm text-slate-500 mt-1">{label}</p>
+      <p className="text-2xl font-bold text-[var(--text-primary)]">{value}</p>
+      <p className="text-sm text-[var(--text-muted)] mt-1">{label}</p>
     </div>
   );
 }
