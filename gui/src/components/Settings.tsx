@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import {
   Settings as SettingsIcon,
   Server,
+  ListX,
+  Type,
   Sun,
   Moon,
   Monitor,
@@ -12,16 +14,19 @@ import {
   Power,
   RefreshCw,
   Copy,
+  RotateCcw,
+  Loader2,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useSettings } from "../context/SettingsContext";
-import type { LspDetection, LspServer, LspStatus, Theme } from "../types";
+import type { FontInfo, LspServerInfo, LspServer, LspStatus, Theme } from "../types";
 
-type TabId = "general" | "lsp";
+type TabId = "general" | "lsp" | "ignore";
 
 const TABS: { id: TabId; label: string; icon: typeof SettingsIcon }[] = [
   { id: "general", label: "常规", icon: SettingsIcon },
   { id: "lsp", label: "LSP Server", icon: Server },
+  { id: "ignore", label: "忽略规则", icon: ListX },
 ];
 
 const LSP_SERVER_DEFS: Omit<LspServer, "status" | "version" | "detectedPath" | "detectionError">[] = [
@@ -228,20 +233,61 @@ function ThemeOption({
 }
 
 function GeneralTab() {
-  const { theme, setTheme } = useSettings();
+  const { theme, setTheme, fontFamily, setFontFamily, fontSize, setFontSize, lineHeight, setLineHeight } = useSettings();
+  const [fonts, setFonts] = useState<FontInfo[]>([]);
+  const [fontsLoading, setFontsLoading] = useState(false);
+  const [fontsLoaded, setFontsLoaded] = useState(false);
+  const [fontSearch, setFontSearch] = useState("");
+
+  const loadFonts = async () => {
+    setFontsLoading(true);
+    try {
+      const result = await invoke<FontInfo[]>("scan_system_fonts");
+      setFonts(result);
+      setFontsLoaded(true);
+    } catch {
+      // Fallback: provide basic generic fonts
+      setFonts([
+        { name: "system-ui", type: "Generic" },
+        { name: "Arial", type: "System" },
+        { name: "Courier New", type: "System" },
+        { name: "Georgia", type: "System" },
+        { name: "Times New Roman", type: "System" },
+        { name: "Verdana", type: "System" },
+        { name: "Consolas", type: "System" },
+        { name: "monospace", type: "Generic" },
+        { name: "sans-serif", type: "Generic" },
+        { name: "serif", type: "Generic" },
+      ]);
+      setFontsLoaded(true);
+    } finally {
+      setFontsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadFonts();
+  }, []);
+
+  const filteredFonts = fontSearch.trim()
+    ? fonts.filter((f) => f.name.toLowerCase().includes(fontSearch.toLowerCase()))
+    : fonts;
+
+  const currentFontLabel = fontFamily === "system-ui" ? "系统默认" : fontFamily;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
+      {/* Theme Section */}
       <section>
         <h2 className="text-sm font-semibold text-[var(--text-secondary)] mb-1">外观</h2>
         <p className="text-xs text-[var(--text-muted)] mb-4">
-          选择应用的主题外观,设置会立即生效。
+          选择应用的主题外观，设置会立即生效。
         </p>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <ThemeOption
             value="light"
             label="浅色"
-            description="明亮的配色,适合日间使用。"
+            description="明亮的配色，适合日间使用。"
             Icon={Sun}
             selected={theme === "light"}
             onSelect={() => setTheme("light")}
@@ -249,7 +295,7 @@ function GeneralTab() {
           <ThemeOption
             value="dark"
             label="深色"
-            description="深色背景,减轻视觉疲劳。"
+            description="深色背景，减轻视觉疲劳。"
             Icon={Moon}
             selected={theme === "dark"}
             onSelect={() => setTheme("dark")}
@@ -262,6 +308,189 @@ function GeneralTab() {
             selected={theme === "system"}
             onSelect={() => setTheme("system")}
           />
+        </div>
+      </section>
+
+      {/* Font Section */}
+      <section>
+        <div className="flex items-center gap-2 mb-4">
+          <Type size={16} className="text-[var(--text-secondary)]" />
+          <h2 className="text-sm font-semibold text-[var(--text-secondary)]">字体</h2>
+        </div>
+
+        <div className="grid grid-cols-[1fr_280px] gap-6">
+          {/* Font Family — left column */}
+          <div>
+            <label className="block text-xs font-medium text-[var(--text-secondary)] mb-2">
+              字体系列
+            </label>
+            <div className="relative">
+              <input
+                type="text"
+                value={fontSearch}
+                onChange={(e) => setFontSearch(e.target.value)}
+                placeholder="搜索字体..."
+                className="w-full px-3 py-2 bg-[var(--bg-subtle)] border border-[var(--border-default)]
+                  rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-faint)]
+                  focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30
+                  transition-colors mb-2"
+              />
+              <div className="max-h-48 overflow-y-auto border border-[var(--border-default)] rounded-lg divide-y divide-[var(--border-subtle)]">
+                {/* System default option */}
+                <button
+                  onClick={() => { setFontFamily("system-ui"); setFontSearch(""); }}
+                  className={`w-full flex items-center justify-between px-3 py-2 text-sm text-left transition-colors
+                    ${fontFamily === "system-ui"
+                      ? "bg-indigo-50 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300"
+                      : "text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)]"
+                    }`}
+                >
+                  <span style={{ fontFamily: "system-ui" }}>系统默认</span>
+                  {fontFamily === "system-ui" && <CheckCircle2 size={14} className="text-indigo-500" />}
+                </button>
+
+                {fontsLoading && (
+                  <div className="flex items-center gap-2 px-3 py-3 text-xs text-[var(--text-muted)]">
+                    <Loader2 size={14} className="animate-spin" />
+                    正在扫描系统字体...
+                  </div>
+                )}
+
+                {filteredFonts.map((font) => (
+                  <button
+                    key={font.name}
+                    onClick={() => { setFontFamily(font.name); setFontSearch(""); }}
+                    className={`w-full flex items-center justify-between px-3 py-2 text-sm text-left transition-colors
+                      ${fontFamily === font.name
+                        ? "bg-indigo-50 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300"
+                        : "text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)]"
+                      }`}
+                  >
+                    <span style={{ fontFamily: font.name }}>{font.name}</span>
+                    <span className="text-[10px] text-[var(--text-faint)] ml-2 flex-shrink-0">{font.type}</span>
+                  </button>
+                ))}
+
+                {!fontsLoading && filteredFonts.length === 0 && fontsLoaded && (
+                  <div className="px-3 py-3 text-xs text-[var(--text-muted)] text-center">
+                    没有匹配的字体
+                  </div>
+                )}
+              </div>
+              <p className="mt-1.5 text-[11px] text-[var(--text-faint)]">
+                当前: <span style={{ fontFamily }} className="font-medium">{currentFontLabel}</span>
+                {!fontsLoaded && (
+                  <button
+                    onClick={loadFonts}
+                    className="ml-2 text-indigo-500 hover:text-indigo-600 transition-colors"
+                  >
+                    扫描系统字体
+                  </button>
+                )}
+              </p>
+            </div>
+          </div>
+
+          {/* Right column: description + font size + line height */}
+          <div className="flex flex-col gap-4">
+            <p className="text-xs text-[var(--text-muted)]">
+              自定义应用的字体、大小和行高。设置会立即生效。
+            </p>
+
+            {/* Font Size */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs font-medium text-[var(--text-secondary)]">
+                  字体大小
+                </label>
+                <span className="text-xs text-[var(--text-faint)] font-mono">{fontSize}px</span>
+              </div>
+              <input
+                type="range"
+                min={10}
+                max={24}
+                step={1}
+                value={fontSize}
+                onChange={(e) => setFontSize(Number(e.target.value))}
+                className="w-full h-1.5 bg-[var(--bg-muted)] rounded-full appearance-none cursor-pointer
+                  accent-indigo-600"
+              />
+              <div className="flex justify-between mt-1">
+                <span className="text-[10px] text-[var(--text-faint)]">10px</span>
+                <span className="text-[10px] text-[var(--text-faint)]">24px</span>
+              </div>
+            </div>
+
+            {/* Line Height */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs font-medium text-[var(--text-secondary)]">
+                  行高
+                </label>
+                <span className="text-xs text-[var(--text-faint)] font-mono">{lineHeight.toFixed(1)}</span>
+              </div>
+              <input
+                type="range"
+                min={1.0}
+                max={2.5}
+                step={0.1}
+                value={lineHeight}
+                onChange={(e) => setLineHeight(Number(e.target.value))}
+                className="w-full h-1.5 bg-[var(--bg-muted)] rounded-full appearance-none cursor-pointer
+                  accent-indigo-600"
+              />
+              <div className="flex justify-between mt-1">
+                <span className="text-[10px] text-[var(--text-faint)]">1.0</span>
+                <span className="text-[10px] text-[var(--text-faint)]">2.5</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Preview */}
+        <div className="mt-5">
+          <label className="block text-xs font-medium text-[var(--text-secondary)] mb-2">
+            预览
+          </label>
+          <div
+            className="p-5 bg-[var(--bg-subtle)] border border-[var(--border-default)] rounded-xl"
+            style={{ fontFamily, fontSize: `${fontSize}px`, lineHeight }}
+          >
+            <p className="text-[var(--text-primary)] font-semibold mb-2" style={{ fontSize: `${fontSize + 4}px` }}>
+              StatCode 代码分析工具
+            </p>
+            <p className="text-[var(--text-secondary)] mb-3">
+              快速扫描项目目录，统计文件类型、代码行数和字节大小，帮助你了解代码库的结构和规模。
+            </p>
+            <div className="bg-[var(--bg-surface)] rounded-lg p-3 border border-[var(--border-subtle)]">
+              <p className="text-[var(--text-muted)]" style={{ fontFamily: "monospace, " + fontFamily, fontSize: `${fontSize - 1}px` }}>
+                {`function analyze(path: string): Result {`}
+                <br />
+                {`  const files = walkDirectory(path);`}
+                <br />
+                {`  return files.reduce(summarize, {});`}
+                <br />
+                {`}`}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Reset */}
+        <div className="flex justify-end mt-4">
+          <button
+            onClick={() => {
+              setFontFamily("system-ui");
+              setFontSize(14);
+              setLineHeight(1.6);
+            }}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg
+              text-[var(--text-muted)] hover:text-[var(--text-secondary)]
+              hover:bg-[var(--bg-muted)] transition-colors"
+          >
+            <RotateCcw size={12} />
+            恢复默认字体
+          </button>
         </div>
       </section>
     </div>
@@ -416,7 +645,7 @@ function LspCard({ server, onToggle }: LspCardProps) {
   );
 }
 
-function buildServer(def: typeof LSP_SERVER_DEFS[number], status: LspStatus, det?: LspDetection): LspServer {
+function buildServer(def: typeof LSP_SERVER_DEFS[number], status: LspStatus, det?: LspServerInfo): LspServer {
   return {
     ...def,
     status,
@@ -437,13 +666,10 @@ function LspTab() {
     setDetecting(true);
     setDetectError(null);
     try {
-      const results = await invoke<LspDetection[]>("detect_lsp_servers");
+      const results = await invoke<LspServerInfo[]>("detect_lsp_servers");
       const byId = new Map(results.map((r) => [r.id, r]));
       setServers((prev) =>
         prev.map((s) => {
-          if (s.id !== "rust-analyzer" && s.id !== "typescript-language-server") {
-            return s;
-          }
           const r = byId.get(s.id) || byId.get(s.command);
           if (!r) return s;
           if (!r.available) {
@@ -542,6 +768,91 @@ function LspTab() {
   );
 }
 
+function IgnoreRulesTab() {
+  const { ignoreRules, setIgnoreRules } = useSettings();
+  const [localRules, setLocalRules] = useState(ignoreRules);
+  const [saved, setSaved] = useState(false);
+
+  const handleSave = () => {
+    setIgnoreRules(localRules);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  const handleReset = () => {
+    // Clear stored value to fall back to defaults
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem("statcode.ignoreRules");
+    }
+    // Reload to pick up the default from SettingsContext
+    window.location.reload();
+  };
+
+  const lineCount = localRules.split("\n").filter((l) => l.trim() && !l.trim().startsWith("#")).length;
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h2 className="text-sm font-semibold text-[var(--text-secondary)] mb-1">共享忽略规则</h2>
+        <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+          每行一条规则，语法与 <code className="px-1 py-0.5 bg-[var(--bg-muted)] rounded text-[11px]">.gitignore</code> 相同。
+          当项目目录中存在 <code className="px-1 py-0.5 bg-[var(--bg-muted)] rounded text-[11px]">.stcignore</code> 文件时，以该项目级文件为准；否则使用此处配置的共享规则。
+        </p>
+      </div>
+
+      <div className="relative">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs text-[var(--text-faint)]">
+            {lineCount} 条有效规则
+          </span>
+          <button
+            onClick={handleReset}
+            className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg
+              text-[var(--text-muted)] hover:text-[var(--text-secondary)]
+              hover:bg-[var(--bg-muted)] transition-colors"
+          >
+            <RotateCcw size={12} />
+            恢复默认
+          </button>
+        </div>
+        <textarea
+          value={localRules}
+          onChange={(e) => setLocalRules(e.target.value)}
+          spellCheck={false}
+          rows={20}
+          className="w-full bg-[var(--bg-subtle)] border border-[var(--border-default)] rounded-xl
+            px-4 py-3 font-mono text-xs leading-relaxed text-[var(--text-primary)]
+            placeholder:text-[var(--text-faint)]
+            focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30
+            transition-colors resize-y"
+          placeholder="# 每行一条忽略规则&#10;node_modules/&#10;dist/&#10;*.log"
+        />
+      </div>
+
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-[var(--text-faint)]">
+          修改后需点击保存生效，规则将在下次分析时应用。
+        </p>
+        <div className="flex items-center gap-3">
+          {saved && (
+            <span className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
+              <CheckCircle2 size={14} />
+              已保存
+            </span>
+          )}
+          <button
+            onClick={handleSave}
+            className="py-2 px-5 bg-indigo-600 text-white text-sm rounded-lg font-medium
+              hover:bg-indigo-700 active:bg-indigo-800 transition-colors"
+          >
+            保存
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Settings() {
   const [activeTab, setActiveTab] = useState<TabId>("general");
 
@@ -583,7 +894,9 @@ export default function Settings() {
         </div>
 
         <div className="p-6">
-          {activeTab === "general" ? <GeneralTab /> : <LspTab />}
+          {activeTab === "general" && <GeneralTab />}
+          {activeTab === "lsp" && <LspTab />}
+          {activeTab === "ignore" && <IgnoreRulesTab />}
         </div>
       </div>
     </div>

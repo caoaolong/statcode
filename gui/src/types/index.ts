@@ -14,7 +14,7 @@ export interface AnalysisResult {
   by_type: FileAnalysis[];
 }
 
-export type Page = "project" | "analysis" | "architecture" | "settings";
+export type Page = "project" | "analysis" | "architecture" | "symbols" | "settings";
 
 export type Theme = "light" | "dark" | "system";
 
@@ -22,6 +22,18 @@ export type LspStatus = "running" | "stopped" | "error" | "not-installed";
 
 export interface LspDetection {
   id: string;
+  available: boolean;
+  version: string | null;
+  path: string | null;
+  error: string | null;
+}
+
+export interface LspServerInfo {
+  id: string;
+  language: string;
+  command: string;
+  args: string[];
+  extensions: string[];
   available: boolean;
   version: string | null;
   path: string | null;
@@ -58,4 +70,42 @@ export interface LspInstallCommand {
     | "pip"
     | "manual";
   command: string;
+}
+
+// ── Font Settings ───────────────────────────────────────────────────
+
+export interface FontInfo {
+  name: string;
+  type: string;
+}
+
+// ── Symbol Analysis ──────────────────────────────────────────────────
+
+export interface SymbolInfo {
+  name: string;
+  kind: string;
+  file_path: string;
+  line: number;
+  column: number;
+  reference_count: number;
+  detail: string;
+}
+
+export interface SymbolAnalysisResult {
+  language: string;
+  symbols: SymbolInfo[];
+  total_symbols: number;
+  files_scanned: number;
+}
+
+// ── Analysis History ─────────────────────────────────────────────────
+
+export interface AnalysisRecord {
+  id: string;
+  project_path: string;
+  project_name: string;
+  analyzed_at: string;
+  languages: string[];
+  analysis: AnalysisResult;
+  symbols: Record<string, SymbolAnalysisResult>;
 }

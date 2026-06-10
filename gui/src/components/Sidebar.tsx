@@ -1,7 +1,9 @@
+import { useCallback, useRef } from "react";
 import {
   FolderOpen,
   BarChart3,
   Brain,
+  Scan,
   ChevronRight,
   Settings as SettingsIcon,
 } from "lucide-react";
@@ -11,6 +13,8 @@ import { useProject } from "../context/ProjectContext";
 interface SidebarProps {
   currentPage: Page;
   onNavigate: (page: Page) => void;
+  width: number;
+  onResize: (width: number) => void;
 }
 
 const NAV_ITEMS = [
@@ -27,6 +31,12 @@ const NAV_ITEMS = [
     requireProject: true,
   },
   {
+    id: "symbols" as Page,
+    label: "符号分析",
+    icon: Scan,
+    requireProject: true,
+  },
+  {
     id: "architecture" as Page,
     label: "架构分析",
     icon: Brain,
@@ -35,13 +45,41 @@ const NAV_ITEMS = [
   },
 ];
 
-export default function Sidebar({ currentPage, onNavigate }: SidebarProps) {
+export default function Sidebar({ currentPage, onNavigate, width, onResize }: SidebarProps) {
   const { projectName, projectPath } = useProject();
+  const dragRef = useRef<{ startX: number; startW: number } | null>(null);
+
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      dragRef.current = { startX: e.clientX, startW: width };
+
+      const onMouseMove = (ev: MouseEvent) => {
+        if (!dragRef.current) return;
+        const delta = ev.clientX - dragRef.current.startX;
+        onResize(dragRef.current.startW + delta);
+      };
+
+      const onMouseUp = () => {
+        dragRef.current = null;
+        document.removeEventListener("mousemove", onMouseMove);
+        document.removeEventListener("mouseup", onMouseUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+    },
+    [width, onResize],
+  );
 
   return (
     <aside
-      className="fixed left-0 top-0 bottom-0 flex flex-col bg-[var(--bg-surface)] border-r border-[var(--border-default)]"
-      style={{ width: "var(--sidebar-width)" }}
+      className="fixed left-0 bottom-0 flex flex-col bg-[var(--bg-surface)] border-r border-[var(--border-default)]"
+      style={{ width, top: "var(--titlebar-height)" }}
     >
       {/* Logo */}
       <div className="h-16 flex items-center px-5 border-b border-[var(--border-subtle)]">
@@ -150,6 +188,14 @@ export default function Sidebar({ currentPage, onNavigate }: SidebarProps) {
         </button>
         <p className="text-[11px] text-[var(--text-faint)] text-center pt-1">v0.1.0</p>
       </div>
+
+      {/* Drag resize handle */}
+      <div
+        onMouseDown={handleMouseDown}
+        className="absolute top-0 right-0 w-1 h-full cursor-col-resize
+          hover:bg-indigo-400/30 active:bg-indigo-400/50 transition-colors"
+        style={{ zIndex: 50 }}
+      />
     </aside>
   );
 }

@@ -4,6 +4,10 @@
 
 :root {
   --sidebar-width: 240px;
+  --titlebar-height: 32px;
+  --app-font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --app-font-size: 14px;
+  --app-line-height: 1.6;
   --bg-app: #f8fafc;
   --bg-surface: #ffffff;
   --bg-muted: #f1f5f9;
@@ -21,8 +25,9 @@
   --tooltip-bg: #ffffff;
   --tooltip-border: #e2e8f0;
   --tooltip-text: #1e293b;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-family: var(--app-font-family);
+  font-size: var(--app-font-size);
+  line-height: var(--app-line-height);
 }
 
 html.dark {
@@ -108,3 +113,68 @@ body {
 .scrollbar-hidden::-webkit-scrollbar {
   display: none;
 }
+
+/* Titlebar */
+.titlebar {
+  display: flex;
+  align-items: center;
+  height: var(--titlebar-height);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-default);
+  user-select: none;
+  -webkit-user-select: none;
+  flex-shrink: 0;
+}
+
+.titlebar-drag-region {
+  app-region: drag;
+  -webkit-app-region: drag;
+}
+
+.titlebar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: var(--titlebar-height);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+  outline: none;
+}
+
+.titlebar-btn:hover {
+  background: var(--bg-muted);
+  color: var(--text-primary);
+}
+
+.titlebar-btn:active {
+  background: var(--border-default);
+}
+
+.titlebar-btn-close:hover {
+  background: #e81123;
+  color: #ffffff;
+}
+
+.titlebar-btn-close:active {
+  background: #c50f1f;
+  color: #ffffff;
+}
+
+/* Resize handle — invisible border around the window for edge dragging */
+.resize-handle {
+  position: fixed;
+  z-index: 9999;
+}
+
+.resize-handle-n { top: 0; left: 4px; right: 4px; height: 4px; cursor: n-resize; }
+.resize-handle-s { bottom: 0; left: 4px; right: 4px; height: 4px; cursor: s-resize; }
+.resize-handle-w { top: 4px; bottom: 4px; left: 0; width: 4px; cursor: w-resize; }
+.resize-handle-e { top: 4px; bottom: 4px; right: 0; width: 4px; cursor: e-resize; }
+.resize-handle-nw { top: 0; left: 0; width: 8px; height: 8px; cursor: nw-resize; }
+.resize-handle-ne { top: 0; right: 0; width: 8px; height: 8px; cursor: ne-resize; }
+.resize-handle-sw { bottom: 0; left: 0; width: 8px; height: 8px; cursor: sw-resize; }
+.resize-handle-se { bottom: 0; right: 0; width: 8px; height: 8px; cursor: se-resize; }

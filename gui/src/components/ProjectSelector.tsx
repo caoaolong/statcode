@@ -1,12 +1,22 @@
-import { FolderOpen, Scan, FileCode, Layers, ArrowRight } from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
+import { FolderOpen, Scan, FileCode, Layers, ArrowRight, CheckCircle2, Loader2, Clock, ChevronRight, RotateCcw } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useProject } from "../context/ProjectContext";
+import { useSettings } from "../context/SettingsContext";
 import { formatLines } from "../lib/utils";
-import type { AnalysisResult, Page } from "../types";
+import HistoryModal from "./HistoryModal";
+import type { AnalysisResult, AnalysisRecord, LspServerInfo, Page, SymbolAnalysisResult } from "../types";
 
 interface ProjectSelectorProps {
   onNavigate: (page: Page) => void;
+}
+
+interface ProjectGroup {
+  project_path: string;
+  project_name: string;
+  count: number;
+  latest: string;
 }
 
 export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
@@ -16,11 +26,75 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
     analysisResult,
     isAnalyzing,
     error,
+    availableLanguages,
+    selectedLanguages,
+    isAnalyzingSymbols,
+    symbolResults,
     setProject,
     setAnalysis,
     setAnalyzing,
     setError,
+    setAvailableLanguages,
+    setSelectedLanguages,
+    setSymbolResult,
+    setAnalyzingSymbols,
+    setSymbolError,
+    saveAnalysisRecord,
   } = useProject();
+  const { ignoreRules } = useSettings();
+
+  const [detectingLsp, setDetectingLsp] = useState(false);
+  const [showLanguageSelect, setShowLanguageSelect] = useState(false);
+  const [historyGroups, setHistoryGroups] = useState<ProjectGroup[]>([]);
+  const [modalProject, setModalProject] = useState<{ path: string; name: string } | null>(null);
+
+  const loadHistory = useCallback(async () => {
+    try {
+      const all = await invoke<AnalysisRecord[]>("load_history");
+      const groupMap = new Map<string, ProjectGroup>();
+      for (const r of all) {
+        const existing = groupMap.get(r.project_path);
+        if (!existing || r.analyzed_at > existing.latest) {
+          groupMap.set(r.project_path, {
+            project_path: r.project_path,
+            project_name: r.project_name,
+            count: (existing?.count || 0) + 1,
+            latest: r.analyzed_at,
+          });
+        } else {
+          existing.count++;
+        }
+      }
+      const groups = Array.from(groupMap.values())
+        .sort((a, b) => b.latest.localeCompare(a.latest));
+      setHistoryGroups(groups);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    loadHistory();
+  }, [loadHistory]);
+
+  // Detect LSP servers when project is selected
+  const detectLanguages = async () => {
+    setDetectingLsp(true);
+    try {
+      const servers = await invoke<LspServerInfo[]>("detect_lsp_servers");
+      setAvailableLanguages(servers);
+      // Auto-select all available languages
+      const available = servers.filter((s) => s.available).map((s) => s.id);
+      setSelectedLanguages(available);
+      if (available.length > 0) {
+        setShowLanguageSelect(true);
+      }
+    } catch {
+      // If detection fails, just proceed without language selection
+    } finally {
+      setDetectingLsp(false);
+    }
+  };
 
   const handleSelectFolder = async () => {
     try {
@@ -32,24 +106,89 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
 
       if (selected) {
         setProject(selected);
-        await runAnalysis(selected);
+        setShowLanguageSelect(false);
+        await detectLanguages();
       }
     } catch (err) {
       setError(`选择文件夹失败: ${err}`);
     }
   };
 
-  const runAnalysis = async (path: string) => {
+  const handleToggleLanguage = (id: string) => {
+    setSelectedLanguages(
+      selectedLanguages.includes(id)
+        ? selectedLanguages.filter((l) => l !== id)
+        : [...selectedLanguages, id],
+    );
+  };
+
+  const handleStartAnalysis = async () => {
+    if (!projectPath) return;
+
+    // Run file analysis
     setAnalyzing(true);
     setError(null);
+    let analysisData: AnalysisResult | null = null;
     try {
-      const result = await invoke<AnalysisResult>("analyze_code", { path });
-      setAnalysis(result);
+      analysisData = await invoke<AnalysisResult>("analyze_code", { path: projectPath, ignoreRules });
+      setAnalysis(analysisData);
     } catch (err) {
       setError(`分析失败: ${err}`);
     } finally {
       setAnalyzing(false);
     }
+
+    // Run symbol analysis for selected languages
+    const collectedSymbols: Record<string, SymbolAnalysisResult> = {};
+    const langNameMap: Record<string, string> = {};
+    for (const lang of availableLanguages) {
+      langNameMap[lang.id] = lang.language;
+    }
+
+    if (selectedLanguages.length > 0) {
+      setAnalyzingSymbols(true);
+      setSymbolError(null);
+      try {
+        for (const langId of selectedLanguages) {
+          const lang = availableLanguages.find((l) => l.id === langId);
+          if (!lang || !lang.available) continue;
+          try {
+            const result = await invoke<SymbolAnalysisResult>("extract_symbols", {
+              projectPath,
+              language: lang.language,
+              command: lang.path || lang.command,
+              args: lang.args,
+              extensions: lang.extensions,
+              ignoreRules,
+            });
+            collectedSymbols[langId] = result;
+            setSymbolResult(langId, result);
+          } catch (err) {
+            // Individual language failure — continue with others
+            console.error(`符号分析失败 (${lang.language}):`, err);
+          }
+        }
+      } finally {
+        setAnalyzingSymbols(false);
+      }
+    }
+
+    // Save to history (use directly collected data, not stale context state)
+    if (analysisData) {
+      await saveAnalysisRecord(analysisData, selectedLanguages, langNameMap, collectedSymbols);
+      await loadHistory();
+    }
+
+    setShowLanguageSelect(false);
+  };
+
+  const installedCount = availableLanguages.filter((l) => l.available).length;
+  const hasSymbolResults = Object.keys(symbolResults).length > 0;
+
+  const formatTime = (iso: string) => {
+    const d = new Date(iso);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   };
 
   return (
@@ -118,22 +257,117 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
         </div>
 
         {/* Loading overlay */}
-        {isAnalyzing && (
+        {(isAnalyzing || detectingLsp) && (
           <div className="absolute inset-0 bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm flex items-center justify-center">
             <div className="flex flex-col items-center gap-3">
               <div className="w-10 h-10 border-3 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
               <p className="text-sm font-medium text-indigo-600">
-                正在分析项目...
+                {detectingLsp ? "正在检测语言服务器..." : "正在分析项目..."}
               </p>
             </div>
           </div>
         )}
       </div>
 
+      {/* Language Selection */}
+      {showLanguageSelect && projectPath && !isAnalyzing && !detectingLsp && (
+        <div className="mt-6 bg-[var(--bg-surface)] border border-[var(--border-default)] rounded-2xl p-6">
+          <div className="mb-4">
+            <h3 className="text-base font-semibold text-[var(--text-primary)] mb-1">
+              选择分析语言
+            </h3>
+            <p className="text-sm text-[var(--text-muted)]">
+              选择需要进行符号分析的编程语言（仅显示已安装 LSP Server 的语言）
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+            {availableLanguages.map((lang) => {
+              const isSelected = selectedLanguages.includes(lang.id);
+              const isAvailable = lang.available;
+
+              return (
+                <button
+                  key={lang.id}
+                  onClick={() => isAvailable && handleToggleLanguage(lang.id)}
+                  disabled={!isAvailable}
+                  className={`
+                    relative flex flex-col items-center gap-2 p-4 rounded-xl border text-center
+                    transition-all duration-200
+                    ${!isAvailable
+                      ? "border-[var(--border-subtle)] bg-[var(--bg-subtle)] opacity-50 cursor-not-allowed"
+                      : isSelected
+                        ? "border-indigo-500 dark:border-indigo-400 bg-indigo-50/60 dark:bg-indigo-500/15 ring-1 ring-indigo-500 dark:ring-indigo-400"
+                        : "border-[var(--border-default)] bg-[var(--bg-surface)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-subtle)]"
+                    }
+                  `}
+                >
+                  {isSelected && (
+                    <CheckCircle2
+                      size={16}
+                      className="absolute top-2 right-2 text-indigo-600 dark:text-indigo-300"
+                    />
+                  )}
+                  <span
+                    className={`text-sm font-medium ${
+                      isSelected
+                        ? "text-indigo-700 dark:text-indigo-300"
+                        : "text-[var(--text-secondary)]"
+                    }`}
+                  >
+                    {lang.language}
+                  </span>
+                  <span className="text-[11px] text-[var(--text-faint)] font-mono">
+                    {lang.command}
+                  </span>
+                  {!isAvailable && (
+                    <span className="text-[10px] text-amber-600 dark:text-amber-400">
+                      未安装
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {installedCount === 0 ? (
+            <p className="text-sm text-[var(--text-muted)] text-center py-2">
+              未检测到已安装的 LSP Server，请先在设置中安装对应的语言服务器。
+            </p>
+          ) : (
+            <div className="flex items-center justify-between">
+              <p className="text-sm text-[var(--text-muted)]">
+                已选择 {selectedLanguages.length} 种语言
+              </p>
+              <button
+                onClick={handleStartAnalysis}
+                disabled={selectedLanguages.length === 0}
+                className="py-2.5 px-6 bg-indigo-600 text-white rounded-xl font-medium text-sm
+                  hover:bg-indigo-700 active:bg-indigo-800 transition-colors flex items-center gap-2
+                  disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <span>开始分析</span>
+                <ArrowRight size={16} />
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Error */}
       {error && (
         <div className="mt-4 p-4 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-xl text-sm text-red-600 dark:text-red-300">
           {error}
+        </div>
+      )}
+
+      {/* Symbol analysis loading */}
+      {isAnalyzingSymbols && (
+        <div className="mt-4 p-4 bg-indigo-50 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/30 rounded-xl flex items-center gap-3">
+          <Loader2 size={18} className="text-indigo-600 dark:text-indigo-400 animate-spin" />
+          <p className="text-sm text-indigo-700 dark:text-indigo-300">
+            正在进行符号分析...
+          </p>
         </div>
       )}
 
@@ -161,16 +395,90 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
         </div>
       )}
 
-      {/* Go to analysis */}
-      {analysisResult && (
-        <button
-          onClick={() => onNavigate("analysis")}
-          className="mt-6 w-full py-3 px-6 bg-indigo-600 text-white rounded-xl font-medium
-            hover:bg-indigo-700 active:bg-indigo-800 transition-colors flex items-center justify-center gap-2"
-        >
-          <span>查看详细分析</span>
-          <ArrowRight size={18} />
-        </button>
+      {/* Go to analysis / symbols */}
+      {analysisResult && !isAnalyzingSymbols && (
+        <div className="mt-6 grid grid-cols-2 gap-4">
+          <button
+            onClick={() => onNavigate("analysis")}
+            className="py-3 px-6 bg-indigo-600 text-white rounded-xl font-medium
+              hover:bg-indigo-700 active:bg-indigo-800 transition-colors flex items-center justify-center gap-2"
+          >
+            <span>查看详细分析</span>
+            <ArrowRight size={18} />
+          </button>
+          {hasSymbolResults && (
+            <button
+              onClick={() => onNavigate("symbols")}
+              className="py-3 px-6 bg-emerald-600 text-white rounded-xl font-medium
+                hover:bg-emerald-700 active:bg-emerald-800 transition-colors flex items-center justify-center gap-2"
+            >
+              <span>查看符号分析</span>
+              <Scan size={18} />
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* History */}
+      {historyGroups.length > 0 && (
+        <div className="mt-10">
+          <div className="flex items-center gap-2 mb-4">
+            <Clock size={18} className="text-[var(--text-faint)]" />
+            <h3 className="text-base font-semibold text-[var(--text-primary)]">历史项目</h3>
+          </div>
+          <div className="space-y-2">
+            {historyGroups.map((g) => (
+              <div
+                key={g.project_path}
+                className="flex items-center gap-4 px-4 py-3 bg-[var(--bg-surface)] border border-[var(--border-default)]
+                  rounded-xl hover:border-[var(--border-strong)] hover:bg-[var(--bg-subtle)] transition-all group"
+              >
+                <div
+                  className="flex-1 flex items-center gap-4 min-w-0 cursor-pointer"
+                  onClick={() => setModalProject({ path: g.project_path, name: g.project_name })}
+                >
+                  <div className="w-9 h-9 rounded-lg bg-[var(--bg-muted)] flex items-center justify-center flex-shrink-0">
+                    <FileCode size={16} className="text-[var(--text-faint)]" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-[var(--text-primary)] truncate">
+                      {g.project_name}
+                    </p>
+                    <p className="text-xs text-[var(--text-faint)] font-mono truncate">
+                      {g.project_path}
+                    </p>
+                  </div>
+                  <div className="text-right flex-shrink-0">
+                    <p className="text-xs text-[var(--text-muted)]">{formatTime(g.latest)}</p>
+                    <p className="text-[11px] text-[var(--text-faint)]">{g.count} 次分析</p>
+                  </div>
+                  <ChevronRight size={16} className="text-[var(--text-faint)] group-hover:text-[var(--text-secondary)] transition-colors flex-shrink-0" />
+                </div>
+                <button
+                  onClick={async () => {
+                    setProject(g.project_path);
+                    await detectLanguages();
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-2 bg-indigo-600 text-white rounded-lg text-xs font-medium
+                    hover:bg-indigo-700 active:bg-indigo-800 transition-colors flex-shrink-0"
+                >
+                  <RotateCcw size={12} />
+                  再次分析
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* History Modal */}
+      {modalProject && (
+        <HistoryModal
+          projectPath={modalProject.path}
+          projectName={modalProject.name}
+          onClose={() => setModalProject(null)}
+          onNavigate={onNavigate}
+        />
       )}
     </div>
   );
