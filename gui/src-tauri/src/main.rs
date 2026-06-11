@@ -944,6 +944,8 @@ struct AnalysisRecord {
     analysis: AnalysisResult,
     symbols: HashMap<String, SymbolAnalysisResult>,
     modules: HashMap<String, ModuleAnalysisResult>,
+    #[serde(default, rename = "functionGraphs")]
+    function_graphs: HashMap<String, FunctionGraphResult>,
 }
 
 fn history_path(app: &tauri::AppHandle) -> std::path::PathBuf {

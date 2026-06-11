@@ -1,5 +1,5 @@
-import { useState, useCallback, useEffect } from "react";
-import { ProjectProvider, useProject } from "./context/ProjectContext";
+import { useState, useCallback } from "react";
+import { ProjectProvider } from "./context/ProjectContext";
 import { SettingsProvider } from "./context/SettingsContext";
 import Titlebar from "./components/Titlebar";
 import Sidebar from "./components/Sidebar";
@@ -15,20 +15,12 @@ const DEFAULT_SIDEBAR_WIDTH = 240;
 const MIN_SIDEBAR_WIDTH = 180;
 const MAX_SIDEBAR_WIDTH = 400;
 
-function AppLayout({ initialServers }: { initialServers: LspServerInfo[] }) {
-  const { setAvailableLanguages } = useProject();
+function AppLayout() {
   const [currentPage, setCurrentPage] = useState<Page>("project");
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
     const saved = localStorage.getItem("statcode.sidebarWidth");
     return saved ? Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Number(saved))) : DEFAULT_SIDEBAR_WIDTH;
   });
-
-  // Set initial LSP servers from Welcome detection
-  useEffect(() => {
-    if (initialServers.length > 0) {
-      setAvailableLanguages(initialServers);
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSidebarResize = useCallback((w: number) => {
     const clamped = Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, w));
@@ -64,10 +56,14 @@ function AppLayout({ initialServers }: { initialServers: LspServerInfo[] }) {
           onResize={handleSidebarResize}
         />
         <main
-          className="flex-1 overflow-y-auto bg-[var(--bg-app)]"
+          className={`flex-1 flex flex-col min-h-0 bg-[var(--bg-app)] ${
+            currentPage === "functionGraph" ? "overflow-hidden" : "overflow-y-auto"
+          }`}
           style={{ marginLeft: sidebarWidth }}
         >
-          <div className="p-8">{renderPage()}</div>
+          <div className={currentPage === "functionGraph" ? "flex-1 min-h-0" : "p-8"}>
+            {renderPage()}
+          </div>
         </main>
       </div>
     </div>
@@ -85,13 +81,13 @@ export default function App() {
 
   return (
     <SettingsProvider>
-      <ProjectProvider>
-        {!ready ? (
-          <Welcome onReady={handleReady} />
-        ) : (
-          <AppLayout initialServers={initialServers} />
-        )}
-      </ProjectProvider>
+      {!ready ? (
+        <Welcome onReady={handleReady} />
+      ) : (
+        <ProjectProvider initialServers={initialServers}>
+          <AppLayout />
+        </ProjectProvider>
+      )}
     </SettingsProvider>
   );
 }

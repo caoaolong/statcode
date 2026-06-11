@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { X, Trash2, RotateCcw, Clock, FileCode, Layers, Scan } from "lucide-react";
+import { X, Trash2, RotateCcw, Clock, FileCode, Layers, Scan, GitBranch } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useProject } from "../context/ProjectContext";
 import { formatLines } from "../lib/utils";
@@ -132,7 +132,7 @@ export default function HistoryModal({ projectPath, projectName, onClose, onNavi
                   </div>
 
                   {/* Stats row */}
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                     <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
                       <FileCode size={14} className="text-indigo-500" />
                       <span>{record.analysis.total_files.toLocaleString()} 文件</span>
@@ -145,6 +145,12 @@ export default function HistoryModal({ projectPath, projectName, onClose, onNavi
                       <Scan size={14} className="text-amber-500" />
                       <span>
                         {Object.values(record.symbols).reduce((s, r) => s + r.total_symbols, 0).toLocaleString()} 符号
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
+                      <GitBranch size={14} className="text-purple-500" />
+                      <span>
+                        {Object.values(record.functionGraphs || {}).reduce((s, r) => s + r.nodes.length, 0).toLocaleString()} 函数
                       </span>
                     </div>
                   </div>

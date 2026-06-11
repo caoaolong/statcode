@@ -1,4 +1,5 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
+// @refresh reset
+import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { AnalysisResult, AnalysisRecord, LspServerInfo, SymbolAnalysisResult, ModuleAnalysisResult, FunctionGraphResult } from "../types";
 
@@ -45,13 +46,28 @@ interface ProjectContextType {
 
 const ProjectContext = createContext<ProjectContextType | null>(null);
 
-export function ProjectProvider({ children }: { children: ReactNode }) {
+export function ProjectProvider({
+  children,
+  initialServers,
+}: {
+  children: ReactNode;
+  initialServers?: LspServerInfo[];
+}) {
   const [projectPath, setProjectPath] = useState<string | null>(null);
   const [projectName, setProjectName] = useState<string | null>(null);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [availableLanguages, setAvailableLanguages] = useState<LspServerInfo[]>([]);
+  const [availableLanguages, setAvailableLanguages] = useState<LspServerInfo[]>(
+    initialServers ?? [],
+  );
+
+  useEffect(() => {
+    if (initialServers && initialServers.length > 0) {
+      setAvailableLanguages(initialServers);
+    }
+  }, [initialServers]);
+
   const [selectedLanguages, setSelectedLanguages] = useState<string[]>([]);
   const [symbolResults, setSymbolResults] = useState<Record<string, SymbolAnalysisResult>>({});
   const [isAnalyzingSymbols, setIsAnalyzingSymbols] = useState(false);
@@ -139,9 +155,18 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     setAnalysisResult(record.analysis);
     setSymbolResults(record.symbols);
     setModuleResults(record.modules || {});
-    setFunctionGraphResults(record.functionGraphs || {});
+    const functionGraphs = record.functionGraphs || {};
+    setFunctionGraphResults(functionGraphs);
     // Restore language IDs so tabs render correctly
-    const ids = record.language_ids || Object.keys(record.modules || {});
+    const ids =
+      record.language_ids?.length
+        ? record.language_ids
+        : [
+            ...new Set([
+              ...Object.keys(record.modules || {}),
+              ...Object.keys(functionGraphs),
+            ]),
+          ];
     setSelectedLanguages(ids);
     // Rebuild minimal availableLanguages from the record
     const langNameMap: Record<string, string> = {};
