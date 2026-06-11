@@ -10,9 +10,10 @@ interface HistoryModalProps {
   projectName: string;
   onClose: () => void;
   onNavigate: (page: Page) => void;
+  onChanged: () => void;
 }
 
-export default function HistoryModal({ projectPath, projectName, onClose, onNavigate }: HistoryModalProps) {
+export default function HistoryModal({ projectPath, projectName, onClose, onNavigate, onChanged }: HistoryModalProps) {
   const { restoreAnalysis } = useProject();
   const [records, setRecords] = useState<AnalysisRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -40,6 +41,7 @@ export default function HistoryModal({ projectPath, projectName, onClose, onNavi
     try {
       await invoke("delete_analysis", { id });
       setRecords((prev) => prev.filter((r) => r.id !== id));
+      onChanged();
     } catch (err) {
       console.error("删除记录失败:", err);
     }

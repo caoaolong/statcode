@@ -5,11 +5,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
 use std::env;
-use tauri::Manager;
+use tauri::{Manager, Emitter};
+
+/// How long `read_response` will wait for the matching LSP response before
+/// returning an error. rust-analyzer's first `documentSymbol` request can be
+/// queued behind workspace indexing, so this is intentionally generous.
+const LSP_READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FileAnalysis {
@@ -214,14 +222,15 @@ struct LspServerInfo {
 
 #[tauri::command]
 fn detect_lsp_servers() -> Vec<LspServerInfo> {
-    let defs: Vec<(&str, &str, &[&str], &[&str], &[&str])> = vec![
-        ("rust-analyzer", "Rust", &["rust-analyzer"], &["--version"], &[".rs"]),
+    let defs: Vec<(&str, &str, &[&str], &[&str], &[&str], &[&str])> = vec![
+        ("rust-analyzer", "Rust", &["rust-analyzer"], &["--version"], &[".rs"], &[]),
         (
             "typescript-language-server",
             "TypeScript / JavaScript",
             &["typescript-language-server", "typescript-language-server.cmd"],
             &["--version"],
             &[".ts", ".tsx", ".js", ".jsx"],
+            &["--stdio"],
         ),
         (
             "pyright",
@@ -229,14 +238,16 @@ fn detect_lsp_servers() -> Vec<LspServerInfo> {
             &["pyright-langserver", "pyright"],
             &["--version"],
             &[".py"],
+            &[],
         ),
-        ("gopls", "Go", &["gopls"], &["version"], &[".go"]),
+        ("gopls", "Go", &["gopls"], &["version"], &[".go"], &[]),
         (
             "clangd",
             "C / C++",
             &["clangd"],
             &["--version"],
             &[".c", ".cc", ".cpp", ".cxx", ".h", ".hpp"],
+            &[],
         ),
         (
             "jdtls",
@@ -244,6 +255,7 @@ fn detect_lsp_servers() -> Vec<LspServerInfo> {
             &["jdtls"],
             &["--version"],
             &[".java"],
+            &[],
         ),
         (
             "csharp-ls",
@@ -251,6 +263,7 @@ fn detect_lsp_servers() -> Vec<LspServerInfo> {
             &["csharp-language-server", "csharp-ls"],
             &["--version"],
             &[".cs"],
+            &[],
         ),
         (
             "lua-ls",
@@ -258,17 +271,18 @@ fn detect_lsp_servers() -> Vec<LspServerInfo> {
             &["lua-language-server"],
             &["--version"],
             &[".lua"],
+            &["--stdio"],
         ),
     ];
 
     defs.into_iter()
-        .map(|(id, lang, cmds, ver_args, exts)| {
+        .map(|(id, lang, cmds, ver_args, exts, lsp_args)| {
             let det = detect_command(cmds, ver_args);
             LspServerInfo {
                 id: id.to_string(),
                 language: lang.to_string(),
                 command: cmds[0].to_string(),
-                args: Vec::new(),
+                args: lsp_args.iter().map(|s| s.to_string()).collect(),
                 extensions: exts.iter().map(|s| s.to_string()).collect(),
                 available: det.available,
                 version: det.version,
@@ -285,18 +299,68 @@ static LSP_REQ_ID: AtomicI64 = AtomicI64::new(1);
 
 struct LspClient {
     child: Child,
+    receiver: mpsc::Receiver<serde_json::Value>,
 }
 
 impl LspClient {
     fn spawn(command: &str, args: &[String]) -> Result<Self, String> {
-        let child = Command::new(command)
+        let mut child = Command::new(command)
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("启动 LSP 服务器失败: {}", e))?;
-        Ok(Self { child })
+        let stdout = child.stdout.take().ok_or("无法获取 stdout")?;
+        let (tx, rx) = mpsc::channel();
+
+        // Dedicated reader thread: parses LSP messages off stdout and pushes
+        // them onto a channel. Keeping this off the main thread lets
+        // `read_response` use `recv_timeout` to bound how long we wait for
+        // each request (rust-analyzer in particular can sit in workspace
+        // indexing for a long time before answering `documentSymbol`).
+        thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut content_length: Option<usize> = None;
+                loop {
+                    let mut header = String::new();
+                    match reader.read_line(&mut header) {
+                        Ok(0) => return, // EOF
+                        Ok(_) => {}
+                        Err(_) => return,
+                    }
+                    let header = header.trim();
+                    if header.is_empty() {
+                        break;
+                    }
+                    if let Some(val) = header.strip_prefix("Content-Length: ") {
+                        content_length = val.parse().ok();
+                    }
+                }
+
+                let length = match content_length {
+                    Some(l) => l,
+                    None => continue,
+                };
+
+                let mut body = vec![0u8; length];
+                if reader.read_exact(&mut body).is_err() {
+                    return;
+                }
+
+                let value: serde_json::Value = match serde_json::from_slice(&body) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                if tx.send(value).is_err() {
+                    return; // main thread dropped receiver, client is gone
+                }
+            }
+        });
+
+        Ok(Self { child, receiver: rx })
     }
 
     fn send_request(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
@@ -330,32 +394,38 @@ impl LspClient {
     }
 
     fn read_response(&mut self, expected_id: i64) -> Result<serde_json::Value, String> {
-        let stdout = self.child.stdout.as_mut().ok_or("无法读取 stdout")?;
-        let mut reader = BufReader::new(stdout);
-
         loop {
-            // Read headers
-            let mut content_length: Option<usize> = None;
-            loop {
-                let mut header = String::new();
-                reader.read_line(&mut header).map_err(|e| format!("读取 header 失败: {}", e))?;
-                let header = header.trim();
-                if header.is_empty() {
-                    break;
+            let value = match self.receiver.recv_timeout(LSP_READ_TIMEOUT) {
+                Ok(v) => v,
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(format!(
+                        "LSP 响应超时 ({:?}), 服务器可能正在索引大型工作区 (rust-analyzer) 或已卡住",
+                        LSP_READ_TIMEOUT
+                    ));
                 }
-                if let Some(val) = header.strip_prefix("Content-Length: ") {
-                    content_length = val.parse().ok();
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err("LSP 服务器意外关闭 (进程已退出)".to_string());
                 }
+            };
+
+            // Server-to-client request (has method + id): the server is
+            // single-threaded and blocks waiting for our reply. We don't
+            // implement any of these (e.g. client/registerCapability,
+            // window/workDoneProgress/create, workspace/configuration), so ack
+            // with MethodNotFound to unblock it.
+            if value.get("method").is_some() {
+                if let Some(id) = value.get("id").and_then(|v| v.as_i64()) {
+                    let err_resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32601, "message": "Method not found" }
+                    });
+                    self.send_message(&err_resp)?;
+                }
+                continue;
             }
 
-            let length = content_length.ok_or("缺少 Content-Length")?;
-            let mut body = vec![0u8; length];
-            reader.read_exact(&mut body).map_err(|e| format!("读取 body 失败: {}", e))?;
-
-            let value: serde_json::Value =
-                serde_json::from_slice(&body).map_err(|e| format!("解析 JSON 失败: {}", e))?;
-
-            // Skip notifications (no id field)
+            // Notification (no id): skip
             if value.get("id").is_none() {
                 continue;
             }
@@ -367,7 +437,7 @@ impl LspClient {
                 }
                 return Ok(value.get("result").cloned().unwrap_or(serde_json::Value::Null));
             }
-            // Otherwise it's a response to a different request — skip
+            // Response with mismatched id (not initiated by us): skip
         }
     }
 
@@ -870,8 +940,10 @@ struct AnalysisRecord {
     project_name: String,
     analyzed_at: String,
     languages: Vec<String>,
+    language_ids: Vec<String>,
     analysis: AnalysisResult,
     symbols: HashMap<String, SymbolAnalysisResult>,
+    modules: HashMap<String, ModuleAnalysisResult>,
 }
 
 fn history_path(app: &tauri::AppHandle) -> std::path::PathBuf {
@@ -914,6 +986,864 @@ fn delete_analysis(app: tauri::AppHandle, id: String) -> Result<(), String> {
     fs::write(&path, json).map_err(|e| e.to_string())
 }
 
+// ── Module Analysis ──────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ModuleNode {
+    file_path: String,
+    short_path: String,
+    line_count: u32,
+    symbol_count: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ModuleEdge {
+    from: String,
+    to: String,
+    symbols: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ModuleAnalysisResult {
+    language: String,
+    nodes: Vec<ModuleNode>,
+    edges: Vec<ModuleEdge>,
+    files_scanned: u32,
+}
+
+/// Extract import paths from source code for a given language.
+fn extract_imports(content: &str, language: &str) -> Vec<String> {
+    let mut imports = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // Skip comments
+        if trimmed.starts_with("//") || trimmed.starts_with("#") || trimmed.starts_with("/*") {
+            continue;
+        }
+        match language {
+            "rust" => {
+                if let Some(cap) = trimmed.strip_prefix("use ") {
+                    let path = cap.trim_end_matches(';').trim();
+                    // Skip grouped imports like use crate::{a, b}
+                    if !path.contains('{') && !path.is_empty() {
+                        imports.push(path.to_string());
+                    }
+                }
+                if let Some(cap) = trimmed.strip_prefix("mod ") {
+                    let name = cap.trim_end_matches(';').trim();
+                    if !name.is_empty() && !name.contains('{') {
+                        imports.push(name.to_string());
+                    }
+                }
+            }
+            "typescript" | "typescriptreact" => {
+                if let Some(from_pos) = line.find(" from ") {
+                    let after_from = &line[from_pos + 6..].trim();
+                    let path = after_from.trim_start_matches('\'').trim_start_matches('"')
+                        .trim_end_matches('\'').trim_end_matches('"')
+                        .trim_end_matches(';').trim();
+                    if path.starts_with('.') {
+                        imports.push(path.to_string());
+                    }
+                }
+            }
+            "python" => {
+                if trimmed.starts_with("from .") {
+                    let rest = &trimmed[5..];
+                    let path = rest.split_whitespace().next().unwrap_or("");
+                    if !path.is_empty() {
+                        imports.push(path.to_string());
+                    }
+                }
+            }
+            "go" => {
+                if trimmed.starts_with("import ") {
+                    let rest = &trimmed[7..].trim();
+                    if rest.starts_with('"') {
+                        let path = rest.trim_start_matches('"').trim_end_matches('"')
+                            .trim_end_matches(';').trim();
+                        if !path.is_empty() {
+                            imports.push(path.to_string());
+                        }
+                    }
+                }
+                if trimmed.starts_with('"') && !trimmed.starts_with("\"\"\"") {
+                    let path = trimmed.trim_start_matches('"').trim_end_matches('"')
+                        .trim_end_matches(';').trim();
+                    if !path.is_empty() {
+                        imports.push(path.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    imports
+}
+
+/// Find all crate roots (directories containing Cargo.toml) in the project.
+fn find_crate_roots(project_path: &str) -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    let root = Path::new(project_path);
+    // Check if root itself has Cargo.toml
+    if root.join("Cargo.toml").exists() {
+        roots.push(root.to_path_buf());
+    }
+    // Check one-level subdirectories for workspace members
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() && p.join("Cargo.toml").exists() {
+                roots.push(p);
+            }
+        }
+    }
+    roots
+}
+
+/// Resolve an import path to a file path within the project.
+fn resolve_import_to_file(
+    project_path: &str,
+    source_file: &str,
+    import_path: &str,
+    language: &str,
+    crate_roots: &[std::path::PathBuf],
+) -> Option<String> {
+    let source_dir = Path::new(source_file).parent()?;
+    let project_root = Path::new(project_path);
+
+    match language {
+        "rust" => {
+            let segments: Vec<&str> = if let Some(rest) = import_path.strip_prefix("crate::") {
+                rest.split("::").collect()
+            } else if let Some(rest) = import_path.strip_prefix("super::") {
+                let mut segs: Vec<&str> = rest.split("::").collect();
+                segs.insert(0, "..");
+                segs
+            } else if let Some(rest) = import_path.strip_prefix("self::") {
+                rest.split("::").collect()
+            } else {
+                vec![import_path]
+            };
+
+            if segments.is_empty() {
+                return None;
+            }
+
+            let rel = segments.join("/");
+
+            // For crate:: paths, try all crate roots
+            if import_path.starts_with("crate::") {
+                for cr in crate_roots {
+                    // Try src/ subdirectory first (standard layout)
+                    for base in &[cr.join("src"), cr.clone()] {
+                        let c1 = base.join(format!("{}.rs", rel));
+                        if c1.exists() {
+                            return c1.to_str().map(|s| s.replace('\\', "/"));
+                        }
+                        let c2 = base.join(format!("{}/mod.rs", rel));
+                        if c2.exists() {
+                            return c2.to_str().map(|s| s.replace('\\', "/"));
+                        }
+                    }
+                }
+                return None;
+            }
+
+            // For relative paths (super::, self::, bare), resolve from source dir
+            let base = source_dir.to_path_buf();
+            let c1 = base.join(format!("{}.rs", rel));
+            if c1.exists() {
+                return c1.to_str().map(|s| s.replace('\\', "/"));
+            }
+            let c2 = base.join(format!("{}/mod.rs", rel));
+            if c2.exists() {
+                return c2.to_str().map(|s| s.replace('\\', "/"));
+            }
+
+            // For bare names, also try as sibling in the same directory
+            if !import_path.contains("::") {
+                let c3 = source_dir.join(format!("{}.rs", import_path));
+                if c3.exists() {
+                    return c3.to_str().map(|s| s.replace('\\', "/"));
+                }
+            }
+
+            None
+        }
+        "typescript" | "typescriptreact" | "javascript" | "javascriptreact" => {
+            if import_path.starts_with('.') {
+                let base = source_dir.join(import_path);
+                for ext in &[".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js", "/index.jsx"] {
+                    let candidate = PathBuf::from(format!("{}{}", base.display(), ext));
+                    if candidate.exists() {
+                        return candidate.to_str().map(|s| s.replace('\\', "/"));
+                    }
+                }
+            }
+            None
+        }
+        "python" => {
+            let base = source_dir.join(import_path.replace('.', "/"));
+            let candidate = base.join("__init__.py");
+            if candidate.exists() {
+                return candidate.to_str().map(|s| s.replace('\\', "/"));
+            }
+            let candidate = PathBuf::from(format!("{}.py", base.display()));
+            if candidate.exists() {
+                return candidate.to_str().map(|s| s.replace('\\', "/"));
+            }
+            None
+        }
+        "go" => {
+            let rel = import_path;
+            let candidate_dir = project_root.join(rel);
+            if candidate_dir.exists() && candidate_dir.is_dir() {
+                if let Ok(entries) = fs::read_dir(&candidate_dir) {
+                    for e in entries.flatten() {
+                        let p = e.path();
+                        if p.extension().map(|e| e == "go").unwrap_or(false) {
+                            return p.to_str().map(|s| s.replace('\\', "/"));
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Normalize a file path for comparison (lowercase drive letter on Windows).
+fn normalize_path(p: &str) -> String {
+    let p = p.replace('\\', "/");
+    if p.len() >= 2 && p.as_bytes()[1] == b':' {
+        format!("{}{}", &p[..1].to_lowercase(), &p[1..])
+    } else {
+        p
+    }
+}
+
+#[tauri::command]
+fn analyze_modules(
+    app: tauri::AppHandle,
+    project_path: String,
+    language: String,
+    _command: String,
+    _args: Vec<String>,
+    extensions: Vec<String>,
+    ignore_rules: Option<String>,
+) -> Result<ModuleAnalysisResult, String> {
+    let project_root = Path::new(&project_path);
+    if !project_root.exists() || !project_root.is_dir() {
+        return Err("路径不存在或不是目录".to_string());
+    }
+
+    // Emit progress: collecting files
+    let _ = app.emit("module-progress", serde_json::json!({
+        "stage": "collecting", "message": "正在收集源文件..."
+    }));
+
+    let (walker, _temp_file) = build_walker(&project_path, &ignore_rules);
+    let ext_set: std::collections::HashSet<String> =
+        extensions.iter().map(|e| e.trim_start_matches('.').to_lowercase()).collect();
+
+    let mut files: Vec<String> = Vec::new();
+    for entry in walker.build().flatten() {
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+        let ext = get_extension(entry.path());
+        if ext_set.contains(&ext) {
+            if let Some(p) = entry.path().to_str() {
+                files.push(p.to_string());
+            }
+        }
+    }
+
+    let files_scanned = files.len() as u32;
+    if files.is_empty() {
+        return Ok(ModuleAnalysisResult {
+            language,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            files_scanned: 0,
+        });
+    }
+
+    let lang_id = match language.as_str() {
+        "Rust" => "rust",
+        "TypeScript / JavaScript" => "typescript",
+        "Python" => "python",
+        "Go" => "go",
+        _ => "plaintext",
+    };
+
+    // Find Rust crate roots for better module resolution
+    let crate_roots = find_crate_roots(&project_path);
+
+    // Phase 1: Read all file contents
+    let _ = app.emit("module-progress", serde_json::json!({
+        "stage": "reading", "message": format!("正在读取 {} 个文件...", files_scanned)
+    }));
+
+    let mut file_contents: HashMap<String, String> = HashMap::new();
+    for file_path in &files {
+        if let Ok(content) = fs::read_to_string(file_path) {
+            file_contents.insert(file_path.clone(), content);
+        }
+    }
+
+    // Phase 2: Path-based resolution (primary method)
+    let _ = app.emit("module-progress", serde_json::json!({
+        "stage": "resolving", "message": "正在解析模块依赖..."
+    }));
+
+    let project_prefix = normalize_path(&project_path);
+    let mut edge_map: HashMap<(String, String), Vec<String>> = HashMap::new();
+    let mut node_lines: HashMap<String, u32> = HashMap::new();
+    let node_symbols: HashMap<String, u32> = HashMap::new();
+
+    for file_path in &files {
+        let content = match file_contents.get(file_path) {
+            Some(c) => c.clone(),
+            None => continue,
+        };
+
+        let line_count = content.lines().count() as u32;
+        node_lines.insert(file_path.clone(), line_count);
+
+        let imports = extract_imports(&content, lang_id);
+
+        for import_path in &imports {
+            // Primary: path-based resolution
+            if let Some(target) = resolve_import_to_file(
+                &project_path, file_path, import_path, lang_id, &crate_roots,
+            ) {
+                let norm_target = normalize_path(&target);
+                let norm_source = normalize_path(file_path);
+                if norm_target != norm_source {
+                    let key = (file_path.clone(), target.clone());
+                    edge_map.entry(key).or_default().push(import_path.clone());
+                }
+            }
+        }
+    }
+
+    // Build nodes — collect involved files before consuming edge_map
+    let mut involved_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (from, to) in edge_map.keys() {
+        involved_files.insert(from.clone());
+        involved_files.insert(to.clone());
+    }
+
+    let nodes: Vec<ModuleNode> = involved_files
+        .into_iter()
+        .map(|fp| {
+            let short = fp.strip_prefix(&project_prefix)
+                .unwrap_or(&fp)
+                .trim_start_matches('/')
+                .to_string();
+            ModuleNode {
+                file_path: fp.clone(),
+                short_path: short,
+                line_count: node_lines.get(&fp).copied().unwrap_or(0),
+                symbol_count: node_symbols.get(&fp).copied().unwrap_or(0),
+            }
+        })
+        .collect();
+
+    let edges: Vec<ModuleEdge> = edge_map
+        .into_iter()
+        .map(|((from, to), symbols)| ModuleEdge { from, to, symbols })
+        .collect();
+
+    // Emit completion
+    let _ = app.emit("module-progress", serde_json::json!({
+        "stage": "done", "message": format!("完成: {} 个模块, {} 条依赖", nodes.len(), edges.len())
+    }));
+
+    Ok(ModuleAnalysisResult {
+        language,
+        nodes,
+        edges,
+        files_scanned,
+    })
+}
+
+// ── Function Graph Analysis ────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone)]
+struct FunctionNode {
+    id: String,
+    name: String,
+    kind: String,
+    file_path: String,
+    short_path: String,
+    line: u32,
+    caller_count: u32,
+    callee_count: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct FunctionEdge {
+    id: String,
+    source: String,
+    target: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct FunctionGraphResult {
+    language: String,
+    nodes: Vec<FunctionNode>,
+    edges: Vec<FunctionEdge>,
+    files_scanned: u32,
+}
+
+/// A flattened function symbol with its location range for call-site resolution.
+#[derive(Clone)]
+struct FuncSymbol {
+    name: String,
+    kind: i32,
+    file_path: String,
+    line: u32,
+    col: u32,
+    /// (start_line, end_line) of the function body for range matching.
+    range_start: u32,
+    range_end: u32,
+}
+
+fn is_function_like(kind: i32) -> bool {
+    matches!(kind, 5 | 6 | 9 | 12 | 23)
+    // Class(5) Method(6) Constructor(9) Function(12) Struct(23)
+}
+
+/// Flatten DocumentSymbol trees, recording the full range for each function-like symbol.
+fn flatten_functions(
+    symbols: &[serde_json::Value],
+    file_path: &str,
+    out: &mut Vec<FuncSymbol>,
+) {
+    for sym in symbols {
+        let name = sym["name"].as_str().unwrap_or("").to_string();
+        let kind = sym["kind"].as_i64().unwrap_or(0) as i32;
+
+        if let Some(range) = sym.get("range") {
+            let sel = sym.get("selectionRange").unwrap_or(range);
+            let line = sel["start"]["line"].as_u64().unwrap_or_else(|| {
+                range["start"]["line"].as_u64().unwrap_or(0)
+            }) as u32;
+            let col = sel["start"]["character"].as_u64().unwrap_or_else(|| {
+                range["start"]["character"].as_u64().unwrap_or(0)
+            }) as u32;
+            let range_start = range["start"]["line"].as_u64().unwrap_or(0) as u32;
+            let range_end = range["end"]["line"].as_u64().unwrap_or(0) as u32;
+
+            if is_function_like(kind) {
+                out.push(FuncSymbol {
+                    name,
+                    kind,
+                    file_path: file_path.to_string(),
+                    line,
+                    col,
+                    range_start,
+                    range_end,
+                });
+            }
+        } else if let Some(location) = sym.get("location") {
+            let line = location["range"]["start"]["line"].as_u64().unwrap_or(0) as u32;
+            let col = location["range"]["start"]["character"].as_u64().unwrap_or(0) as u32;
+            let range_start = line;
+            let range_end = location["range"]["end"]["line"].as_u64().unwrap_or(line as u64) as u32;
+
+            if is_function_like(kind) {
+                out.push(FuncSymbol {
+                    name,
+                    kind,
+                    file_path: file_path.to_string(),
+                    line,
+                    col,
+                    range_start,
+                    range_end,
+                });
+            }
+        }
+
+        if let Some(children) = sym.get("children").and_then(|c| c.as_array()) {
+            flatten_functions(children, file_path, out);
+        }
+    }
+}
+
+#[tauri::command]
+async fn analyze_function_graph(
+    app: tauri::AppHandle,
+    project_path: String,
+    language: String,
+    command: String,
+    args: Vec<String>,
+    extensions: Vec<String>,
+    ignore_rules: Option<String>,
+) -> Result<FunctionGraphResult, String> {
+    let project_root = Path::new(&project_path);
+    if !project_root.exists() || !project_root.is_dir() {
+        return Err("路径不存在或不是目录".to_string());
+    }
+
+    let _ = app.emit("function-graph-progress", serde_json::json!({
+        "stage": "collecting", "message": "正在收集源文件..."
+    }));
+
+    let (walker, _temp_file) = build_walker(&project_path, &ignore_rules);
+    let ext_set: std::collections::HashSet<String> =
+        extensions.iter().map(|e| e.trim_start_matches('.').to_lowercase()).collect();
+
+    let mut files: Vec<String> = Vec::new();
+    for entry in walker.build().flatten() {
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+        let ext = get_extension(entry.path());
+        if ext_set.contains(&ext) {
+            if let Some(p) = entry.path().to_str() {
+                files.push(p.to_string());
+            }
+        }
+    }
+
+    let files_scanned = files.len() as u32;
+    if files.is_empty() {
+        return Ok(FunctionGraphResult {
+            language,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            files_scanned: 0,
+        });
+    }
+
+    let _ = app.emit("function-graph-progress", serde_json::json!({
+        "stage": "connecting", "message": "正在连接 LSP 服务器..."
+    }));
+
+    let mut client = LspClient::spawn(&command, &args)?;
+
+    let root_uri = format!("file:///{}", project_path.replace('\\', "/"));
+    let init_params = serde_json::json!({
+        "processId": std::process::id(),
+        "rootUri": root_uri,
+        "capabilities": {
+            "textDocument": {
+                "documentSymbol": {
+                    "dynamicRegistration": false,
+                    "hierarchicalDocumentSymbolSupport": true,
+                    "symbolKind": { "valueSet": [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26] }
+                },
+                "references": { "dynamicRegistration": false }
+            }
+        }
+    });
+    client.send_request("initialize", init_params)?;
+    client.send_notification("initialized", serde_json::json!({}))?;
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let language_id = match language.as_str() {
+        "Rust" => "rust",
+        "TypeScript / JavaScript" => "typescript",
+        "Python" => "python",
+        "Go" => "go",
+        "C / C++" => "cpp",
+        "Java" => "java",
+        "C#" => "csharp",
+        "Lua" => "lua",
+        _ => "plaintext",
+    };
+
+    let project_prefix = normalize_path(&project_path);
+
+    // Phase 1: Extract all function-like symbols from all files
+    let _ = app.emit("function-graph-progress", serde_json::json!({
+        "stage": "extracting", "message": "正在提取函数符号..."
+    }));
+
+    let mut all_funcs: Vec<FuncSymbol> = Vec::new();
+
+    for (idx, file_path) in files.iter().enumerate() {
+        let content = match fs::read_to_string(file_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let uri = format!("file:///{}", file_path.replace('\\', "/"));
+
+        let _ = client.send_notification(
+            "textDocument/didOpen",
+            serde_json::json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": language_id,
+                    "version": 1,
+                    "text": content
+                }
+            }),
+        );
+
+        let symbols_result = client.send_request(
+            "textDocument/documentSymbol",
+            serde_json::json!({ "textDocument": { "uri": uri } }),
+        );
+
+        if let Ok(symbols_value) = symbols_result {
+            if let Some(symbol_list) = symbols_value.as_array() {
+                flatten_functions(symbol_list, file_path, &mut all_funcs);
+            }
+        }
+
+        let _ = client.send_notification(
+            "textDocument/didClose",
+            serde_json::json!({ "textDocument": { "uri": uri } }),
+        );
+
+        if (idx + 1) % 20 == 0 || idx + 1 == files.len() {
+            let _ = app.emit("function-graph-progress", serde_json::json!({
+                "stage": "extracting",
+                "message": format!("正在提取函数符号... {}/{}", idx + 1, files.len())
+            }));
+        }
+    }
+
+    let total_funcs = all_funcs.len();
+    let _ = app.emit("function-graph-progress", serde_json::json!({
+        "stage": "analyzing",
+        "message": format!("已发现 {} 个函数，正在分析调用关系...", total_funcs)
+    }));
+
+    // Phase 2: Build node index — map (file_path, line) -> index in all_funcs
+    let mut node_index: std::collections::HashMap<(String, u32), usize> = std::collections::HashMap::new();
+    for (i, f) in all_funcs.iter().enumerate() {
+        node_index.insert((f.file_path.clone(), f.line), i);
+    }
+
+    // Phase 3: For each function, query references to find callers
+    // Build two lookups:
+    //   - normalized file path -> Vec<func index>
+    //   - (normalized file path, line) -> func index (for precise matching)
+    let mut file_func_map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    let mut pos_func_map: std::collections::HashMap<(String, u32), usize> = std::collections::HashMap::new();
+    for (i, f) in all_funcs.iter().enumerate() {
+        let norm = normalize_path(&f.file_path);
+        file_func_map.entry(norm.clone()).or_default().push(i);
+        pos_func_map.insert((norm, f.line), i);
+    }
+
+    let mut caller_counts: Vec<u32> = vec![0; total_funcs];
+    let mut callee_counts: Vec<u32> = vec![0; total_funcs];
+    let mut edge_set: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+
+    for (i, func) in all_funcs.iter().enumerate() {
+        let uri = format!("file:///{}", func.file_path.replace('\\', "/"));
+
+        // We need the file open for references to work
+        let content = fs::read_to_string(&func.file_path).unwrap_or_default();
+        let _ = client.send_notification(
+            "textDocument/didOpen",
+            serde_json::json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": language_id,
+                    "version": 1,
+                    "text": content
+                }
+            }),
+        );
+
+        // Query references INCLUDING the declaration so we always get results.
+        let refs_result = client.send_request(
+            "textDocument/references",
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": func.line, "character": func.col },
+                "context": { "includeDeclaration": true }
+            }),
+        );
+
+        if let Ok(refs) = refs_result {
+            if let Some(ref_list) = refs.as_array() {
+                if i < 5 {
+                    eprintln!("[FG] func '{}' at {}:{} got {} refs", func.name, func.file_path, func.line, ref_list.len());
+                }
+                for r in ref_list {
+                    let ref_uri = r["uri"].as_str().unwrap_or("");
+                    let ref_line = r["range"]["start"]["line"].as_u64().unwrap_or(0) as u32;
+                    let ref_col = r["range"]["start"]["character"].as_u64().unwrap_or(0) as u32;
+
+                    // Convert URI to normalized path
+                    let ref_raw = ref_uri.strip_prefix("file:///").unwrap_or(ref_uri);
+                    let ref_os = if cfg!(target_os = "windows") {
+                        ref_raw.replace('/', "\\")
+                    } else {
+                        ref_raw.to_string()
+                    };
+                    let ref_norm = normalize_path(&ref_os);
+                    let func_norm = normalize_path(&func.file_path);
+
+                    if i < 5 {
+                        eprintln!("[FG]   ref at {}:{}:{}  norm={}  func_norm={}", ref_uri, ref_line, ref_col, ref_norm, func_norm);
+                    }
+
+                    // Skip self-reference (the declaration itself)
+                    if ref_norm == func_norm && ref_line == func.line && ref_col == func.col {
+                        if i < 5 { eprintln!("[FG]   -> skipped (self)"); }
+                        continue;
+                    }
+
+                    // Strategy 1: Try to find the exact function containing this
+                    // reference by checking function ranges in the reference's file.
+                    let mut matched = false;
+                    if let Some(indices) = file_func_map.get(&ref_norm) {
+                        let mut best_j: Option<usize> = None;
+                        let mut best_range = u32::MAX;
+                        for &j in indices {
+                            if j == i { continue; }
+                            let caller = &all_funcs[j];
+                            if ref_line >= caller.range_start && ref_line <= caller.range_end {
+                                let span = caller.range_end - caller.range_start;
+                                if span < best_range {
+                                    best_range = span;
+                                    best_j = Some(j);
+                                }
+                            }
+                        }
+                        if let Some(j) = best_j {
+                            if edge_set.insert((j, i)) {
+                                caller_counts[i] += 1;
+                                callee_counts[j] += 1;
+                                if i < 10 {
+                                    eprintln!("[FG]   -> EDGE (S1): {} calls {}", all_funcs[j].name, func.name);
+                                }
+                            }
+                            matched = true;
+                        }
+                    }
+
+                    // Strategy 2: If range matching failed, check if the reference
+                    // is at a known function's definition line (the call might be
+                    // directly at the function signature, e.g. `fn foo() { bar() }`).
+                    if !matched {
+                        if let Some(&j) = pos_func_map.get(&(ref_norm.clone(), ref_line)) {
+                            if j != i {
+                                if edge_set.insert((j, i)) {
+                                    caller_counts[i] += 1;
+                                    callee_counts[j] += 1;
+                                    if i < 10 {
+                                        eprintln!("[FG]   -> EDGE (S2): {} calls {}", all_funcs[j].name, func.name);
+                                    }
+                                }
+                                matched = true;
+                            }
+                        }
+                    }
+
+                    // Strategy 3: If still unmatched and reference is in a file
+                    // that contains any function, pick the first one as a fallback.
+                    // This handles module-level calls and loose code.
+                    if !matched {
+                        if let Some(indices) = file_func_map.get(&ref_norm) {
+                            if let Some(&j) = indices.first() {
+                                if j != i {
+                                    if edge_set.insert((j, i)) {
+                                        caller_counts[i] += 1;
+                                        callee_counts[j] += 1;
+                                        if i < 10 {
+                                            eprintln!("[FG]   -> EDGE (S3): {} calls {}", all_funcs[j].name, func.name);
+                                        }
+                                    }
+                                }
+                            }
+                        } else if i < 5 {
+                            eprintln!("[FG]   -> NO MATCH: ref_norm={} not in file_func_map keys", ref_norm);
+                        }
+                    }
+                }
+            }
+        }
+
+        let _ = client.send_notification(
+            "textDocument/didClose",
+            serde_json::json!({ "textDocument": { "uri": uri } }),
+        );
+
+        if (i + 1) % 10 == 0 || i + 1 == total_funcs {
+            let _ = app.emit("function-graph-progress", serde_json::json!({
+                "stage": "analyzing",
+                "message": format!("正在分析调用关系... {}/{}", i + 1, total_funcs)
+            }));
+        }
+    }
+
+    let _ = client.shutdown();
+
+    // Phase 4: Build result
+    let nodes: Vec<FunctionNode> = all_funcs
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let short = f
+                .file_path
+                .strip_prefix(&project_prefix)
+                .unwrap_or(&f.file_path)
+                .trim_start_matches('/')
+                .to_string();
+            FunctionNode {
+                id: format!("{}:{}", f.file_path, f.line + 1),
+                name: f.name.clone(),
+                kind: lsp_symbol_kind_name(f.kind).to_string(),
+                file_path: f.file_path.clone(),
+                short_path: short,
+                line: f.line + 1,
+                caller_count: caller_counts[i],
+                callee_count: callee_counts[i],
+            }
+        })
+        .collect();
+
+    let edges: Vec<FunctionEdge> = edge_set
+        .iter()
+        .map(|&(caller_idx, callee_idx)| {
+            let src = &all_funcs[caller_idx];
+            let tgt = &all_funcs[callee_idx];
+            FunctionEdge {
+                id: format!(
+                    "{}:{}→{}:{}",
+                    src.file_path, src.line + 1,
+                    tgt.file_path, tgt.line + 1
+                ),
+                source: format!("{}:{}", src.file_path, src.line + 1),
+                target: format!("{}:{}", tgt.file_path, tgt.line + 1),
+            }
+        })
+        .collect();
+
+    eprintln!("[FG] Summary: {} functions, {} edges, {} files", nodes.len(), edges.len(), files_scanned);
+    eprintln!("[FG] file_func_map keys: {:?}", file_func_map.keys().collect::<Vec<_>>());
+    if !edges.is_empty() {
+        for e in &edges {
+            eprintln!("[FG]   edge: {} -> {}", e.source, e.target);
+        }
+    }
+
+    let _ = app.emit("function-graph-progress", serde_json::json!({
+        "stage": "done",
+        "message": format!("完成: {} 个函数, {} 条调用关系", nodes.len(), edges.len())
+    }));
+
+    Ok(FunctionGraphResult {
+        language,
+        nodes,
+        edges,
+        files_scanned,
+    })
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -925,7 +1855,9 @@ fn main() {
             scan_system_fonts,
             save_analysis,
             load_history,
-            delete_analysis
+            delete_analysis,
+            analyze_modules,
+            analyze_function_graph
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

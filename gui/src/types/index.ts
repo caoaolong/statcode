@@ -14,7 +14,7 @@ export interface AnalysisResult {
   by_type: FileAnalysis[];
 }
 
-export type Page = "project" | "analysis" | "architecture" | "symbols" | "settings";
+export type Page = "project" | "analysis" | "architecture" | "functionGraph" | "settings";
 
 export type Theme = "light" | "dark" | "system";
 
@@ -98,6 +98,54 @@ export interface SymbolAnalysisResult {
   files_scanned: number;
 }
 
+// ── Module Analysis ──────────────────────────────────────────────────
+
+export interface ModuleNode {
+  file_path: string;
+  short_path: string;
+  line_count: number;
+  symbol_count: number;
+}
+
+export interface ModuleEdge {
+  from: string;
+  to: string;
+  symbols: string[];
+}
+
+export interface ModuleAnalysisResult {
+  language: string;
+  nodes: ModuleNode[];
+  edges: ModuleEdge[];
+  files_scanned: number;
+}
+
+// ── Function Graph ─────────────────────────────────────────────────
+
+export interface FunctionNode {
+  id: string;
+  name: string;
+  kind: string;
+  file_path: string;
+  short_path: string;
+  line: number;
+  caller_count: number;
+  callee_count: number;
+}
+
+export interface FunctionEdge {
+  id: string;
+  source: string;
+  target: string;
+}
+
+export interface FunctionGraphResult {
+  language: string;
+  nodes: FunctionNode[];
+  edges: FunctionEdge[];
+  files_scanned: number;
+}
+
 // ── Analysis History ─────────────────────────────────────────────────
 
 export interface AnalysisRecord {
@@ -106,6 +154,9 @@ export interface AnalysisRecord {
   project_name: string;
   analyzed_at: string;
   languages: string[];
+  language_ids: string[];
   analysis: AnalysisResult;
   symbols: Record<string, SymbolAnalysisResult>;
+  modules: Record<string, ModuleAnalysisResult>;
+  functionGraphs?: Record<string, FunctionGraphResult>;
 }

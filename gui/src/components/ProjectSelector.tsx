@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
-import { FolderOpen, Scan, FileCode, Layers, ArrowRight, CheckCircle2, Loader2, Clock, ChevronRight, RotateCcw } from "lucide-react";
+import { FolderOpen, Scan, FileCode, Layers, ArrowRight, CheckCircle2, Loader2, Clock, ChevronRight, RotateCcw, GitBranch } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useProject } from "../context/ProjectContext";
 import { useSettings } from "../context/SettingsContext";
 import { formatLines } from "../lib/utils";
 import HistoryModal from "./HistoryModal";
-import type { AnalysisResult, AnalysisRecord, LspServerInfo, Page, SymbolAnalysisResult } from "../types";
+import type { AnalysisResult, AnalysisRecord, LspServerInfo, Page, SymbolAnalysisResult, ModuleAnalysisResult, FunctionGraphResult } from "../types";
 
 interface ProjectSelectorProps {
   onNavigate: (page: Page) => void;
@@ -29,14 +30,14 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
     availableLanguages,
     selectedLanguages,
     isAnalyzingSymbols,
-    symbolResults,
+    functionGraphResults,
+    setFunctionGraphResult,
     setProject,
     setAnalysis,
     setAnalyzing,
     setError,
     setAvailableLanguages,
     setSelectedLanguages,
-    setSymbolResult,
     setAnalyzingSymbols,
     setSymbolError,
     saveAnalysisRecord,
@@ -47,6 +48,7 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
   const [showLanguageSelect, setShowLanguageSelect] = useState(false);
   const [historyGroups, setHistoryGroups] = useState<ProjectGroup[]>([]);
   const [modalProject, setModalProject] = useState<{ path: string; name: string } | null>(null);
+  const [analysisProgress, setAnalysisProgress] = useState<string | null>(null);
 
   const loadHistory = useCallback(async () => {
     try {
@@ -77,13 +79,19 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
     loadHistory();
   }, [loadHistory]);
 
-  // Detect LSP servers when project is selected
+  // Detect LSP servers when project is selected (skip if already detected at startup)
   const detectLanguages = async () => {
+    const existing = availableLanguages.filter((s) => s.available);
+    if (existing.length > 0) {
+      // Already have servers from startup — just auto-select and show
+      setSelectedLanguages(existing.map((s) => s.id));
+      setShowLanguageSelect(true);
+      return;
+    }
     setDetectingLsp(true);
     try {
       const servers = await invoke<LspServerInfo[]>("detect_lsp_servers");
       setAvailableLanguages(servers);
-      // Auto-select all available languages
       const available = servers.filter((s) => s.available).map((s) => s.id);
       setSelectedLanguages(available);
       if (available.length > 0) {
@@ -128,6 +136,7 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
     // Run file analysis
     setAnalyzing(true);
     setError(null);
+    setAnalysisProgress("正在分析代码结构...");
     let analysisData: AnalysisResult | null = null;
     try {
       analysisData = await invoke<AnalysisResult>("analyze_code", { path: projectPath, ignoreRules });
@@ -138,8 +147,10 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
       setAnalyzing(false);
     }
 
-    // Run symbol analysis for selected languages
+    // Run function graph analysis for selected languages
     const collectedSymbols: Record<string, SymbolAnalysisResult> = {};
+    const collectedModules: Record<string, ModuleAnalysisResult> = {};
+    const collectedFunctionGraphs: Record<string, FunctionGraphResult> = {};
     const langNameMap: Record<string, string> = {};
     for (const lang of availableLanguages) {
       langNameMap[lang.id] = lang.language;
@@ -152,8 +163,14 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
         for (const langId of selectedLanguages) {
           const lang = availableLanguages.find((l) => l.id === langId);
           if (!lang || !lang.available) continue;
+
+          // Function graph analysis (combines symbol + call relationship analysis)
+          setAnalysisProgress(`正在分析 ${lang.language} 函数图谱...`);
+          const unlisten = await listen<{ stage: string; message: string }>("function-graph-progress", (event) => {
+            setAnalysisProgress(event.payload.message);
+          });
           try {
-            const result = await invoke<SymbolAnalysisResult>("extract_symbols", {
+            const fgResult = await invoke<FunctionGraphResult>("analyze_function_graph", {
               projectPath,
               language: lang.language,
               command: lang.path || lang.command,
@@ -161,29 +178,31 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
               extensions: lang.extensions,
               ignoreRules,
             });
-            collectedSymbols[langId] = result;
-            setSymbolResult(langId, result);
+            collectedFunctionGraphs[langId] = fgResult;
+            setFunctionGraphResult(langId, fgResult);
           } catch (err) {
-            // Individual language failure — continue with others
-            console.error(`符号分析失败 (${lang.language}):`, err);
+            console.error(`函数图谱分析失败 (${lang.language}):`, err);
           }
+          unlisten();
         }
       } finally {
         setAnalyzingSymbols(false);
+        setAnalysisProgress(null);
       }
     }
 
     // Save to history (use directly collected data, not stale context state)
     if (analysisData) {
-      await saveAnalysisRecord(analysisData, selectedLanguages, langNameMap, collectedSymbols);
+      await saveAnalysisRecord(analysisData, selectedLanguages, langNameMap, collectedSymbols, collectedModules, collectedFunctionGraphs);
       await loadHistory();
     }
 
     setShowLanguageSelect(false);
+    setAnalysisProgress(null);
   };
 
   const installedCount = availableLanguages.filter((l) => l.available).length;
-  const hasSymbolResults = Object.keys(symbolResults).length > 0;
+  const hasFunctionGraphResults = Object.keys(functionGraphResults).length > 0;
 
   const formatTime = (iso: string) => {
     const d = new Date(iso);
@@ -361,12 +380,12 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
         </div>
       )}
 
-      {/* Symbol analysis loading */}
-      {isAnalyzingSymbols && (
+      {/* Analysis progress */}
+      {(isAnalyzingSymbols || analysisProgress) && (
         <div className="mt-4 p-4 bg-indigo-50 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/30 rounded-xl flex items-center gap-3">
           <Loader2 size={18} className="text-indigo-600 dark:text-indigo-400 animate-spin" />
           <p className="text-sm text-indigo-700 dark:text-indigo-300">
-            正在进行符号分析...
+            {analysisProgress || "正在进行分析..."}
           </p>
         </div>
       )}
@@ -395,7 +414,7 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
         </div>
       )}
 
-      {/* Go to analysis / symbols */}
+      {/* Go to analysis / function graph */}
       {analysisResult && !isAnalyzingSymbols && (
         <div className="mt-6 grid grid-cols-2 gap-4">
           <button
@@ -406,14 +425,14 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
             <span>查看详细分析</span>
             <ArrowRight size={18} />
           </button>
-          {hasSymbolResults && (
+          {hasFunctionGraphResults && (
             <button
-              onClick={() => onNavigate("symbols")}
+              onClick={() => onNavigate("functionGraph")}
               className="py-3 px-6 bg-emerald-600 text-white rounded-xl font-medium
                 hover:bg-emerald-700 active:bg-emerald-800 transition-colors flex items-center justify-center gap-2"
             >
-              <span>查看符号分析</span>
-              <Scan size={18} />
+              <span>查看函数图谱</span>
+              <GitBranch size={18} />
             </button>
           )}
         </div>
@@ -478,6 +497,7 @@ export default function ProjectSelector({ onNavigate }: ProjectSelectorProps) {
           projectName={modalProject.name}
           onClose={() => setModalProject(null)}
           onNavigate={onNavigate}
+          onChanged={loadHistory}
         />
       )}
     </div>

@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { AnalysisResult, AnalysisRecord, LspServerInfo, SymbolAnalysisResult } from "../types";
+import type { AnalysisResult, AnalysisRecord, LspServerInfo, SymbolAnalysisResult, ModuleAnalysisResult, FunctionGraphResult } from "../types";
 
 interface ProjectContextType {
   projectPath: string | null;
@@ -15,6 +15,12 @@ interface ProjectContextType {
   symbolResults: Record<string, SymbolAnalysisResult>;
   isAnalyzingSymbols: boolean;
   symbolError: string | null;
+  // Module analysis
+  moduleResults: Record<string, ModuleAnalysisResult>;
+  setModuleResult: (langId: string, result: ModuleAnalysisResult) => void;
+  // Function graph
+  functionGraphResults: Record<string, FunctionGraphResult>;
+  setFunctionGraphResult: (langId: string, result: FunctionGraphResult) => void;
   // Actions
   setProject: (path: string) => void;
   setAnalysis: (result: AnalysisResult) => void;
@@ -31,6 +37,8 @@ interface ProjectContextType {
     langs: string[],
     langNames: Record<string, string>,
     symbols: Record<string, SymbolAnalysisResult>,
+    modules: Record<string, ModuleAnalysisResult>,
+    fgs?: Record<string, FunctionGraphResult>,
   ) => Promise<void>;
   restoreAnalysis: (record: AnalysisRecord) => void;
 }
@@ -48,6 +56,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const [symbolResults, setSymbolResults] = useState<Record<string, SymbolAnalysisResult>>({});
   const [isAnalyzingSymbols, setIsAnalyzingSymbols] = useState(false);
   const [symbolError, setSymbolError] = useState<string | null>(null);
+  const [moduleResults, setModuleResults] = useState<Record<string, ModuleAnalysisResult>>({});
+  const [functionGraphResults, setFunctionGraphResults] = useState<Record<string, FunctionGraphResult>>({});
 
   const setProject = useCallback((path: string) => {
     setProjectPath(path);
@@ -58,6 +68,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     setSelectedLanguages([]);
     setSymbolResults({});
     setSymbolError(null);
+    setModuleResults({});
+    setFunctionGraphResults({});
   }, []);
 
   const setAnalysis = useCallback((result: AnalysisResult) => {
@@ -70,6 +82,14 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
   const setSymbolResult = useCallback((langId: string, result: SymbolAnalysisResult) => {
     setSymbolResults((prev) => ({ ...prev, [langId]: result }));
+  }, []);
+
+  const setModuleResult = useCallback((langId: string, result: ModuleAnalysisResult) => {
+    setModuleResults((prev) => ({ ...prev, [langId]: result }));
+  }, []);
+
+  const setFunctionGraphResult = useCallback((langId: string, result: FunctionGraphResult) => {
+    setFunctionGraphResults((prev) => ({ ...prev, [langId]: result }));
   }, []);
 
   const setAnalyzingSymbols = useCallback((loading: boolean) => {
@@ -91,6 +111,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     langs: string[],
     langNames: Record<string, string>,
     symbols: Record<string, SymbolAnalysisResult>,
+    modules: Record<string, ModuleAnalysisResult>,
+    fgs?: Record<string, FunctionGraphResult>,
   ) => {
     const record: AnalysisRecord = {
       id: crypto.randomUUID(),
@@ -98,8 +120,11 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       project_name: analysis.project_name,
       analyzed_at: new Date().toISOString(),
       languages: langs.map((id) => langNames[id] || id),
+      language_ids: langs,
       analysis,
       symbols,
+      modules,
+      functionGraphs: fgs,
     };
     try {
       await invoke("save_analysis", { record });
@@ -113,8 +138,30 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     setProjectName(record.project_name);
     setAnalysisResult(record.analysis);
     setSymbolResults(record.symbols);
-    setSelectedLanguages([]);
-    setAvailableLanguages([]);
+    setModuleResults(record.modules || {});
+    setFunctionGraphResults(record.functionGraphs || {});
+    // Restore language IDs so tabs render correctly
+    const ids = record.language_ids || Object.keys(record.modules || {});
+    setSelectedLanguages(ids);
+    // Rebuild minimal availableLanguages from the record
+    const langNameMap: Record<string, string> = {};
+    if (record.language_ids) {
+      record.language_ids.forEach((id, i) => {
+        langNameMap[id] = record.languages[i] || id;
+      });
+    }
+    const restored: LspServerInfo[] = ids.map((id) => ({
+      id,
+      language: langNameMap[id] || id,
+      command: "",
+      args: [],
+      extensions: [],
+      available: true,
+      version: null,
+      path: null,
+      error: null,
+    }));
+    setAvailableLanguages(restored);
     setError(null);
     setSymbolError(null);
     setIsAnalyzing(false);
@@ -134,6 +181,10 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         symbolResults,
         isAnalyzingSymbols,
         symbolError,
+        moduleResults,
+        setModuleResult,
+        functionGraphResults,
+        setFunctionGraphResult,
         setProject,
         setAnalysis,
         setAnalyzing,

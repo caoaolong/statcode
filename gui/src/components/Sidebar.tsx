@@ -3,7 +3,7 @@ import {
   FolderOpen,
   BarChart3,
   Brain,
-  Scan,
+  GitBranch,
   ChevronRight,
   Settings as SettingsIcon,
 } from "lucide-react";
@@ -31,9 +31,9 @@ const NAV_ITEMS = [
     requireProject: true,
   },
   {
-    id: "symbols" as Page,
-    label: "符号分析",
-    icon: Scan,
+    id: "functionGraph" as Page,
+    label: "函数图谱",
+    icon: GitBranch,
     requireProject: true,
   },
   {
